@@ -169,6 +169,7 @@ const DICT: Record<string, Record<string, string>> = {
     noAgents: "没有运行中的 agent",
     statusRunning: "运行中",
     statusExited: "已退出",
+    statusPending: "待恢复",
   },
   en: {
     workspaces: "Work Spaces",
@@ -302,6 +303,7 @@ const DICT: Record<string, Record<string, string>> = {
     noAgents: "No running agents",
     statusRunning: "Running",
     statusExited: "Exited",
+    statusPending: "Pending",
   },
 };
 
@@ -712,7 +714,7 @@ function agentsHtml(): string {
       return `<div class="proj-item agent-row" data-term-open="${s.id}">
         <span class="ico">&gt;_</span>
         <span class="p">${esc(agentLabel(s.agentKey))}<span class="agent-ws"> · ${esc(wsName)}</span></span>
-        <span class="d" style="color:${s.exited ? "var(--text-faint)" : "var(--green)"};">${esc(t(s.exited ? "statusExited" : "statusRunning"))}</span>
+        <span class="d" style="color:${!s.spawned || s.exited ? "var(--text-faint)" : "var(--green)"};">${esc(t(!s.spawned ? "statusPending" : s.exited ? "statusExited" : "statusRunning"))}</span>
         <span class="tab-close" data-term-close="${s.id}" title="${esc(t("closeTab"))}">✕</span>
       </div>`;
     })
@@ -745,7 +747,11 @@ function wireTerminal(termId: number) {
   if (!sess) return;
   const host = $("termHost");
   if (sess.el.parentElement !== host) host.appendChild(sess.el);
-  if (sess.term.element) sess.fit.fit();
+  if (sess.spawned) {
+    sess.fit.fit();
+  } else {
+    startTerminal(sess); // first activation: open xterm + spawn/resume the PTY
+  }
 }
 function renderMain() {
   const main = $("main");
@@ -1296,12 +1302,17 @@ function pinSubTab(wsId: string, termId: number) {
   render();
 }
 // ---------- embedded terminal (PROTOTYPE — experiment branch) ----------
-interface TermSession { term: Terminal; fit: FitAddon; el: HTMLElement; id: number; wsId: string; agentKey: string; exited: boolean; pinned: boolean; }
+interface TermSession {
+  term: Terminal; fit: FitAddon; el: HTMLElement; id: number; wsId: string;
+  agentKey: string; sessionId: string; resume: boolean;
+  exited: boolean; pinned: boolean; spawned: boolean;
+}
 const termSessions = new Map<number, TermSession>(); // termId -> session
 let nextTermId = 1;
 
-async function openTerminal(ws: Workspace) {
-  // every launch spawns a NEW session/sub-tab
+async function openTerminal(ws: Workspace, opts: { activate?: boolean; sessionId?: string; resume?: boolean; pinned?: boolean; agentKey?: string } = {}): Promise<TermSession> {
+  // every launch spawns a NEW session/sub-tab; the PTY itself starts lazily on
+  // first activation (restored tabs don't spawn processes until opened)
   const id = nextTermId++;
   const cs = getComputedStyle(document.documentElement);
   const cssVar = (n: string) => cs.getPropertyValue(n).trim() || undefined;
@@ -1331,7 +1342,15 @@ async function openTerminal(ws: Workspace) {
   term.loadAddon(fit);
   const el = document.createElement("div");
   el.className = "term-el";
-  const sess: TermSession = { term, fit, el, id, wsId: ws.id, agentKey: ws.agent ?? settings.defaultAgent ?? "", exited: false, pinned: false };
+  const sess: TermSession = {
+    term, fit, el, id, wsId: ws.id,
+    agentKey: opts.agentKey ?? ws.agent ?? settings.defaultAgent ?? "",
+    sessionId: opts.sessionId ?? crypto.randomUUID(),
+    resume: opts.resume ?? false,
+    exited: false,
+    pinned: opts.pinned ?? false,
+    spawned: false,
+  };
   termSessions.set(id, sess);
   // console-style clipboard: Ctrl+C copies when there's a selection (otherwise
   // it's ^C), Ctrl+V pastes; right-click copies the selection or pastes
@@ -1359,11 +1378,11 @@ async function openTerminal(ws: Workspace) {
       navigator.clipboard.readText().then((t2) => t2 && invoke("term_write", { id, data: t2 }));
     }
   });
-  term.onData((d) => invoke("term_write", { id, data: d }));
-  term.onResize(({ cols, rows }) => invoke("term_resize", { id, cols, rows }));
+  term.onData((d) => { if (sess.spawned) invoke("term_write", { id, data: d }); });
+  term.onResize(({ cols, rows }) => { if (sess.spawned) invoke("term_resize", { id, cols, rows }); });
   // reflow on window/pane resize (only while attached)
   new ResizeObserver(() => {
-    if (sess.el.isConnected) sess.fit.fit();
+    if (sess.el.isConnected && sess.spawned) sess.fit.fit();
   }).observe(el);
   await listen<string>(`term-data-${id}`, (e) => term.write(e.payload));
   await listen(`term-exit-${id}`, () => {
@@ -1372,15 +1391,35 @@ async function openTerminal(ws: Workspace) {
     render(); // refresh tab labels / agents count
   });
   ensureTab(ws.id);
-  orderOf(ws.id).push(id);
-  view = { kind: "terminal", id: String(id) };
-  render(); // renderMain attaches the terminal DOM
+  const order = orderOf(ws.id);
+  if (sess.pinned) {
+    let pos = 0;
+    while (pos < order.length && termSessions.get(order[pos])?.pinned) pos++;
+    order.splice(pos, 0, id);
+  } else {
+    order.push(id);
+  }
+  if (opts.activate !== false) {
+    view = { kind: "terminal", id: String(id) };
+    render(); // wireTerminal → startTerminal
+  }
+  return sess;
+}
+
+// opens the xterm DOM and spawns the PTY on first activation
+async function startTerminal(sess: TermSession) {
+  if (sess.spawned) return;
+  sess.spawned = true;
   sess.term.open(sess.el);
   sess.fit.fit();
   sess.term.focus();
   setStatus(t("launching"));
   try {
-    await invoke("launch_agent_embedded", { workspaceId: ws.id, agentOverride: null, termId: id, cols: sess.term.cols, rows: sess.term.rows });
+    // spawn at the terminal's real size so the agent draws one correct frame
+    await invoke("launch_agent_embedded", {
+      workspaceId: sess.wsId, agentOverride: sess.agentKey || null, termId: sess.id,
+      cols: sess.term.cols, rows: sess.term.rows, sessionId: sess.sessionId, resume: sess.resume,
+    });
     setStatus("");
   } catch (err) {
     setStatus(`${t("launchFailed")}：${err}`, true);
@@ -1826,14 +1865,25 @@ async function reload() {
 // ---------- UI session state (persist open tabs / pins / active page) ----------
 interface UiState {
   tabs: { wsId: string; pinned: boolean }[];
-  active: string | null; // wsId or "agents"
+  active: string | null; // wsId | "agents" | "settings" | "term:<sessionId>"
+  terms?: { wsId: string; agentKey: string; sessionId: string; pinned: boolean }[];
 }
 let uiRestored = false;
 function persistUi() {
   if (!uiRestored) return;
+  let active: string | null;
+  if (view.kind === "terminal") {
+    const s = termSessions.get(Number((view as { id: string }).id));
+    active = s ? `term:${s.sessionId}` : null;
+  } else {
+    active = activeWsId() ?? (view.kind === "agents" ? "agents" : view.kind === "settings" ? "settings" : null);
+  }
   const state: UiState = {
     tabs: openTabs.map((tb) => ({ wsId: tb.wsId, pinned: !!tb.pinned })),
-    active: activeWsId() ?? (view.kind === "agents" ? "agents" : view.kind === "settings" ? "settings" : null),
+    active,
+    terms: [...termSessions.values()]
+      .sort((a, b) => a.id - b.id)
+      .map((s) => ({ wsId: s.wsId, agentKey: s.agentKey, sessionId: s.sessionId, pinned: s.pinned })),
   };
   invoke("save_ui_state", { state });
 }
@@ -1880,15 +1930,27 @@ document.addEventListener("keydown", async (e) => {
   wireFileDrop();
   wireSplitter();
   getVersion().then((v) => (appVersion = v));
-  // restore UI session: open tabs (+pins) and the active page. Terminal
-  // sessions are NOT resurrected (resume-by-session-id is a separate idea).
+  // restore UI session: open tabs (+pins), terminal sub-tabs (resumed lazily on
+  // first activation via the stored session id), and the active page.
   let restored = false;
   const ui = await invoke<UiState | null>("load_ui_state");
   if (ui) {
     openTabs = ui.tabs
       .filter((tb) => workspaces.some((w) => w.id === tb.wsId))
       .map((tb) => ({ key: `ws:${tb.wsId}`, wsId: tb.wsId, pinned: tb.pinned }));
-    if (ui.active === "agents") {
+    for (const tt of ui.terms ?? []) {
+      const ws = workspaces.find((w) => w.id === tt.wsId);
+      if (!ws) continue;
+      await openTerminal(ws, { activate: false, sessionId: tt.sessionId, resume: true, pinned: tt.pinned, agentKey: tt.agentKey });
+    }
+    if (ui.active?.startsWith("term:")) {
+      const sid = ui.active.slice(5);
+      const sess = [...termSessions.values()].find((s) => s.sessionId === sid);
+      if (sess) {
+        view = { kind: "terminal", id: String(sess.id) };
+        restored = true;
+      }
+    } else if (ui.active === "agents") {
       view = { kind: "agents" };
       restored = true;
     } else if (ui.active === "settings") {

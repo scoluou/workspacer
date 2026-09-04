@@ -207,7 +207,7 @@ fn build_context_doc(ws: &Workspace) -> String {
 /// Build (program, args, cwd) for a given agent over the workspace.
 /// Description injection: claude/pi use --append-system-prompt, codex/agent/
 /// opencode take it as the initial prompt.
-fn build_agent(agent: &str, ws: &Workspace) -> Result<(String, String, String), String> {
+fn build_agent(agent: &str, ws: &Workspace, session_id: &str, resume: bool) -> Result<(String, String, String), String> {
     let folders: Vec<&String> = ws.projects.iter().map(|p| &p.path).collect();
     // empty workspace: fall back to the user's home dir as cwd
     let primary = folders
@@ -220,8 +220,28 @@ fn build_agent(agent: &str, ws: &Workspace) -> Result<(String, String, String), 
         .map(|f| format!(" --add-dir {}", quote(f)))
         .collect();
 
+    if resume {
+        // resume an earlier session; context is NOT re-injected (the session
+        // already has it). claude/pi resume by our assigned id; codex/opencode/
+        // cursor only support "latest session" — best effort.
+        let args = match agent {
+            "claude" => format!("--resume {}{}", quote(session_id), add_dirs),
+            "pi" => format!("--session-id {}", quote(session_id)),
+            "codex" => format!("-C {} resume --last", quote(&primary)),
+            "opencode" => format!("{} --continue", quote(&primary)),
+            "agent" => format!("--trust --workspace {}{} --continue", quote(&primary), add_dirs),
+            other => return Err(format!("unknown agent: {other}")),
+        };
+        return Ok((agent.into(), args.trim().to_string(), primary));
+    }
+
     let context = build_context(ws);
     let has_ctx = !context.is_empty();
+    // claude/pi let us assign the session id at launch → deterministic resume
+    let sid = match agent {
+        "claude" | "pi" => format!("--session-id {} ", quote(session_id)),
+        _ => String::new(),
+    };
     // Files attached → full context document in a temp file (multi-line, small
     // file contents inlined). Delivery: claude has --append-system-prompt-file,
     // pi auto-reads an existing path passed to --append-system-prompt, the
@@ -260,7 +280,7 @@ fn build_agent(agent: &str, ws: &Workspace) -> Result<(String, String, String), 
             ("codex".into(), args, primary)
         }
         "claude" => {
-            let mut args = add_dirs.trim_start().to_string();
+            let mut args = format!("{}{}", sid, add_dirs.trim_start());
             if let Some(d) = &doc {
                 if !args.is_empty() { args.push(' '); }
                 args.push_str(&format!("--append-system-prompt-file {}", quote(&d.display().to_string())));
@@ -280,7 +300,7 @@ fn build_agent(agent: &str, ws: &Workspace) -> Result<(String, String, String), 
             ("opencode".into(), args, primary)
         }
         "pi" => {
-            let mut args = String::new();
+            let mut args = sid;
             if let Some(d) = &doc {
                 // pi reads the file when the value is an existing path
                 args.push_str(&format!("--append-system-prompt {}", quote(&d.display().to_string())));
@@ -387,8 +407,10 @@ fn launch_agent_embedded(
     term_id: u32,
     cols: u16,
     rows: u16,
+    session_id: String,
+    resume: bool,
 ) -> Result<String, String> {
-    let (prog, args, cwd) = resolve_launch(&workspace_id, agent_override)?;
+    let (prog, args, cwd) = resolve_launch(&workspace_id, agent_override, &session_id, resume)?;
     // agents are .cmd shims → must run under cmd; our args string is already
     // quoted, and portable-pty joins without re-quoting, so the line survives intact
     let cmdline = if args.is_empty() { prog.clone() } else { format!("{prog} {args}") };
@@ -603,7 +625,7 @@ fn list_agents() -> Vec<AgentInfo> {
 /// Shared launch resolution: workspace → agent key → (prog, args, cwd), with
 /// an installed check so a missing agent fails cleanly instead of flashing a
 /// console.
-fn resolve_launch(workspace_id: &str, agent_override: Option<String>) -> Result<(String, String, String), String> {
+fn resolve_launch(workspace_id: &str, agent_override: Option<String>, session_id: &str, resume: bool) -> Result<(String, String, String), String> {
     let ws = load_workspaces()
         .into_iter()
         .find(|w| w.id == workspace_id)
@@ -614,7 +636,7 @@ fn resolve_launch(workspace_id: &str, agent_override: Option<String>) -> Result<
         .or(ws.agent.clone())
         .or(settings.default_agent)
         .ok_or("no agent selected and no default configured")?;
-    let (prog, args, cwd) = build_agent(&agent_key, &ws)?;
+    let (prog, args, cwd) = build_agent(&agent_key, &ws, session_id, resume)?;
     if !on_path(&prog) {
         return Err(format!("agent '{prog}' is not installed (not found on PATH)"));
     }
@@ -623,7 +645,8 @@ fn resolve_launch(workspace_id: &str, agent_override: Option<String>) -> Result<
 
 #[tauri::command]
 fn launch_agent(workspace_id: String, agent_override: Option<String>) -> Result<String, String> {
-    let (prog, args, cwd) = resolve_launch(&workspace_id, agent_override)?;
+    let sid = uuid::Uuid::new_v4().to_string();
+    let (prog, args, cwd) = resolve_launch(&workspace_id, agent_override, &sid, false)?;
     // Build ONE command line and hand it to `cmd /c` verbatim. `Command::args`
     // would MSVC-quote the line (inner `"` become `\"`), and cmd's /c parser
     // then mangles it — raw_arg appends the line unquoted, which is exactly
@@ -662,7 +685,8 @@ fn launch_agent(workspace_id: String, agent_override: Option<String>) -> Result<
 /// doubling — cmd_safe already folded `"` to `'` in context text).
 #[tauri::command]
 fn launch_agent_ps(workspace_id: String, agent_override: Option<String>) -> Result<String, String> {
-    let (prog, args, cwd) = resolve_launch(&workspace_id, agent_override)?;
+    let sid = uuid::Uuid::new_v4().to_string();
+    let (prog, args, cwd) = resolve_launch(&workspace_id, agent_override, &sid, false)?;
     fn psq(s: &str) -> String {
         format!("'{}'", s.replace('\'', "''"))
     }
@@ -847,7 +871,7 @@ mod tests {
     fn agent_args_have_balanced_quotes() {
         let w = ws("n", "d");
         for agent in ["agent", "codex", "claude", "opencode", "pi"] {
-            let (_p, args, _c) = build_agent(agent, &w).unwrap();
+            let (_p, args, _c) = build_agent(agent, &w, "test-id", false).unwrap();
             assert_eq!(args.matches('"').count() % 2, 0, "{agent}: unbalanced quotes: {args}");
         }
     }
@@ -855,13 +879,26 @@ mod tests {
     #[test]
     fn empty_context_adds_no_prompt_flag() {
         let w = ws("n", "");
-        let (_p, args, _c) = build_agent("claude", &w).unwrap();
+        let (_p, args, _c) = build_agent("claude", &w, "test-id", false).unwrap();
         assert!(!args.contains("--append-system-prompt"), "no ctx arg: {args}");
     }
 
     #[test]
+    fn session_id_assigned_at_launch_and_used_at_resume() {
+        let w = ws("n", "d");
+        let (_p, fresh, _c) = build_agent("claude", &w, "my-id", false).unwrap();
+        assert!(fresh.contains("--session-id \"my-id\""), "fresh assigns id: {fresh}");
+        let (_p, res, _c) = build_agent("claude", &w, "my-id", true).unwrap();
+        assert!(res.contains("--resume \"my-id\""), "resume uses id: {res}");
+        assert!(!res.contains("--append-system-prompt"), "resume skips context: {res}");
+        // pi uses the same flag for both
+        let (_p, pi_fresh, _c) = build_agent("pi", &w, "my-id", false).unwrap();
+        assert!(pi_fresh.contains("--session-id \"my-id\""), "pi fresh: {pi_fresh}");
+    }
+
+    #[test]
     fn unknown_agent_errors() {
-        assert!(build_agent("nope", &ws("n", "")).is_err());
+        assert!(build_agent("nope", &ws("n", ""), "x", false).is_err());
     }
 
     #[test]
