@@ -372,6 +372,14 @@ function applyAppearance() {
   const root = document.documentElement;
   if (settings.theme) root.dataset.theme = settings.theme;
   else delete root.dataset.theme;
+  // live-update embedded terminals too (xterm supports runtime theme switch)
+  const mono = getComputedStyle(root).getPropertyValue("--mono").trim();
+  termSessions.forEach((sess) => {
+    sess.term.options.theme = termTheme();
+    if (mono) sess.term.options.fontFamily = mono;
+    sess.term.options.fontSize = settings.fontSize ?? 13;
+    sess.term.options.fontWeight = (settings.fontWeight ?? 400) as 400;
+  });
   if (settings.fontSize) root.style.setProperty("--font-size", settings.fontSize + "px");
   else root.style.removeProperty("--font-size");
   if (settings.fontWeight) root.style.setProperty("--font-weight", String(settings.fontWeight));
@@ -1409,6 +1417,27 @@ function pinSubTab(wsId: string, termId: number) {
   render();
 }
 // ---------- embedded terminal (PROTOTYPE — experiment branch) ----------
+// terminal palette/fonts read from the live CSS variables (theme-aware)
+function termTheme() {
+  const cs = getComputedStyle(document.documentElement);
+  const cssVar = (n: string) => cs.getPropertyValue(n).trim() || undefined;
+  return {
+    background: cssVar("--bg"),
+    foreground: cssVar("--text"),
+    cursor: cssVar("--text"),
+    cursorAccent: cssVar("--bg"),
+    selectionBackground: cssVar("--bg-active"),
+    red: cssVar("--danger"),
+    green: cssVar("--green"),
+    blue: cssVar("--accent"),
+    yellow: cssVar("--yellow"),
+    magenta: cssVar("--term-magenta"),
+    cyan: cssVar("--term-cyan"),
+    brightBlack: cssVar("--text-faint"),
+    brightWhite: cssVar("--text"),
+  };
+}
+
 interface TermSession {
   term: Terminal; fit: FitAddon; el: HTMLElement; id: number; wsId: string;
   agentKey: string; sessionId: string; sessionLabel: string; resume: boolean;
@@ -1425,29 +1454,13 @@ async function openTerminal(ws: Workspace, opts: { activate?: boolean; sessionId
   // every launch spawns a NEW session/sub-tab; the PTY itself starts lazily on
   // first activation (restored tabs don't spawn processes until opened)
   const id = nextTermId++;
-  const cs = getComputedStyle(document.documentElement);
-  const cssVar = (n: string) => cs.getPropertyValue(n).trim() || undefined;
   const term = new Terminal({
-    fontFamily: cssVar("--mono") ?? "monospace",
+    fontFamily: getComputedStyle(document.documentElement).getPropertyValue("--mono").trim() || "monospace",
     fontSize: settings.fontSize ?? 13,
     fontWeight: (settings.fontWeight ?? 400) as 400,
     fontWeightBold: 700,
     lineHeight: 1.18,
-    theme: {
-      background: cssVar("--bg"),
-      foreground: cssVar("--text"),
-      cursor: cssVar("--text"),
-      cursorAccent: cssVar("--bg"),
-      selectionBackground: cssVar("--bg-active"),
-      red: cssVar("--danger"),
-      green: cssVar("--green"),
-      blue: cssVar("--accent"),
-      yellow: "#d29922",
-      magenta: "#8b5cf6",
-      cyan: "#39c5cf",
-      brightBlack: cssVar("--text-faint"),
-      brightWhite: "#ffffff",
-    },
+    theme: termTheme(),
   });
   const fit = new FitAddon();
   term.loadAddon(fit);
