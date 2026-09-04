@@ -1362,7 +1362,7 @@ interface TermSession {
 const termSessions = new Map<number, TermSession>(); // termId -> session
 let nextTermId = 1;
 
-async function openTerminal(ws: Workspace, opts: { activate?: boolean; sessionId?: string; sessionLabel?: string; resume?: boolean; pinned?: boolean; agentKey?: string } = {}): Promise<TermSession> {
+async function openTerminal(ws: Workspace, opts: { activate?: boolean; sessionId?: string; sessionLabel?: string; resume?: boolean; pinned?: boolean; agentKey?: string; entries?: { text: string; line: number; time: number }[] } = {}): Promise<TermSession> {
   // every launch spawns a NEW session/sub-tab; the PTY itself starts lazily on
   // first activation (restored tabs don't spawn processes until opened)
   const id = nextTermId++;
@@ -1408,7 +1408,7 @@ async function openTerminal(ws: Workspace, opts: { activate?: boolean; sessionId
     exited: false,
     pinned: opts.pinned ?? false,
     spawned: false,
-    entries: [],
+    entries: [...(opts.entries ?? [])],
     inputBuf: "",
   };
   termSessions.set(id, sess);
@@ -1497,11 +1497,16 @@ async function startTerminal(sess: TermSession) {
   setStatus(t("launching"));
   try {
     // spawn at the terminal's real size so the agent draws one correct frame
-    await invoke("launch_agent_embedded", {
+    const info = await invoke<{ prog: string; initial_prompt: string | null }>("launch_agent_embedded", {
       workspaceId: sess.wsId, agentOverride: sess.agentKey || null, termId: sess.id,
       cols: sess.term.cols, rows: sess.term.rows, sessionId: sess.sessionId, resume: sess.resume,
       sessionLabel: sess.sessionLabel,
     });
+    // the injected first prompt belongs in the conversation record too
+    if (info.initial_prompt) {
+      sess.entries.push({ text: info.initial_prompt, line: 0, time: Date.now() });
+      renderConvBar(sess);
+    }
     setStatus("");
   } catch (err) {
     setStatus(`${t("launchFailed")}：${err}`, true);
@@ -1948,7 +1953,7 @@ async function reload() {
 interface UiState {
   tabs: { wsId: string; pinned: boolean }[];
   active: string | null; // wsId | "agents" | "settings" | "term:<sessionId>"
-  terms?: { wsId: string; agentKey: string; sessionId: string; sessionLabel: string; pinned: boolean }[];
+  terms?: { wsId: string; agentKey: string; sessionId: string; sessionLabel: string; pinned: boolean; entries: { text: string; line: number; time: number }[] }[];
 }
 let uiRestored = false;
 function persistUi() {
@@ -1965,7 +1970,7 @@ function persistUi() {
     active,
     terms: [...termSessions.values()]
       .sort((a, b) => a.id - b.id)
-      .map((s) => ({ wsId: s.wsId, agentKey: s.agentKey, sessionId: s.sessionId, sessionLabel: s.sessionLabel, pinned: s.pinned })),
+      .map((s) => ({ wsId: s.wsId, agentKey: s.agentKey, sessionId: s.sessionId, sessionLabel: s.sessionLabel, pinned: s.pinned, entries: s.entries })),
   };
   invoke("save_ui_state", { state });
 }
@@ -2023,7 +2028,7 @@ document.addEventListener("keydown", async (e) => {
     for (const tt of ui.terms ?? []) {
       const ws = workspaces.find((w) => w.id === tt.wsId);
       if (!ws) continue;
-      await openTerminal(ws, { activate: false, sessionId: tt.sessionId, sessionLabel: tt.sessionLabel, resume: true, pinned: tt.pinned, agentKey: tt.agentKey });
+      await openTerminal(ws, { activate: false, sessionId: tt.sessionId, sessionLabel: tt.sessionLabel, resume: true, pinned: tt.pinned, agentKey: tt.agentKey, entries: tt.entries });
     }
     if (ui.active?.startsWith("term:")) {
       const sid = ui.active.slice(5);

@@ -212,10 +212,20 @@ fn build_context_doc(ws: &Workspace, label: &str) -> String {
     doc
 }
 
-/// Build (program, args, cwd) for a given agent over the workspace.
+/// Everything needed to launch an agent.
+struct LaunchSpec {
+    prog: String,
+    args: String,
+    cwd: String,
+    /// the prompt injected as the first user message (prompt-channel agents
+    /// only; None for system-prompt agents and on resume)
+    initial_prompt: Option<String>,
+}
+
+/// Build the launch spec for a given agent over the workspace.
 /// Description injection: claude/pi use --append-system-prompt, codex/agent/
 /// opencode take it as the initial prompt.
-fn build_agent(agent: &str, ws: &Workspace, session_id: &str, resume: bool, label: &str) -> Result<(String, String, String), String> {
+fn build_agent(agent: &str, ws: &Workspace, session_id: &str, resume: bool, label: &str) -> Result<LaunchSpec, String> {
     let folders: Vec<&String> = ws.projects.iter().map(|p| &p.path).collect();
     // empty workspace: fall back to the user's home dir as cwd
     let primary = folders
@@ -240,7 +250,7 @@ fn build_agent(agent: &str, ws: &Workspace, session_id: &str, resume: bool, labe
             "agent" => format!("--trust --workspace {}{} --continue", quote(&primary), add_dirs),
             other => return Err(format!("unknown agent: {other}")),
         };
-        return Ok((agent.into(), args.trim().to_string(), primary));
+        return Ok(LaunchSpec { prog: agent.into(), args: args.trim().to_string(), cwd: primary, initial_prompt: None });
     }
 
     let context = build_context(ws, label);
@@ -279,21 +289,27 @@ fn build_agent(agent: &str, ws: &Workspace, session_id: &str, resume: bool, labe
     let res = match agent {
         "agent" => {
             let mut args = format!("--trust --workspace {}{}", quote(&primary), add_dirs);
+            let mut initial = None;
             if let Some(p) = &pointer {
                 args.push_str(&format!(" {}", quote(p))); // initial prompt
+                initial = Some(p.clone());
             } else if has_ctx {
                 args.push_str(&format!(" {}", quote(&context)));
+                initial = Some(context.clone());
             }
-            ("agent".into(), args, primary)
+            ("agent".into(), args, primary, initial)
         }
         "codex" => {
             let mut args = format!("-C {}{}", quote(&primary), add_dirs);
+            let mut initial = None;
             if let Some(p) = &pointer {
                 args.push_str(&format!(" {}", quote(p))); // initial prompt
+                initial = Some(p.clone());
             } else if has_ctx {
                 args.push_str(&format!(" {}", quote(&context)));
+                initial = Some(context.clone());
             }
-            ("codex".into(), args, primary)
+            ("codex".into(), args, primary, initial)
         }
         "claude" => {
             let mut args = format!("{}{}", sid, add_dirs.trim_start());
@@ -304,16 +320,19 @@ fn build_agent(agent: &str, ws: &Workspace, session_id: &str, resume: bool, labe
                 if !args.is_empty() { args.push(' '); }
                 args.push_str(&format!("--append-system-prompt {}", quote(&context)));
             }
-            ("claude".into(), args, primary)
+            ("claude".into(), args, primary, None)
         }
         "opencode" => {
             let mut args = quote(&primary);
+            let mut initial = None;
             if let Some(p) = &pointer {
                 args.push_str(&format!(" --prompt {}", quote(p)));
+                initial = Some(p.clone());
             } else if has_ctx {
                 args.push_str(&format!(" --prompt {}", quote(&context)));
+                initial = Some(context.clone());
             }
-            ("opencode".into(), args, primary)
+            ("opencode".into(), args, primary, initial)
         }
         "pi" => {
             // --name makes the session recognizable in pi's resume picker
@@ -329,11 +348,12 @@ fn build_agent(agent: &str, ws: &Workspace, session_id: &str, resume: bool, labe
             } else if has_ctx {
                 args.push_str(&format!("--append-system-prompt {}", quote(&context)));
             }
-            ("pi".into(), args, primary)
+            ("pi".into(), args, primary, None)
         }
         other => return Err(format!("unknown agent: {other}")),
     };
-    Ok(res)
+    let (prog, args, cwd, initial_prompt) = res;
+    Ok(LaunchSpec { prog, args: args.trim().to_string(), cwd, initial_prompt })
 }
 
 /// Is `prog` resolvable on PATH (PATHEXT-aware)? Used to fail fast with a
@@ -424,6 +444,13 @@ fn term_kill(sessions: tauri::State<PtyMap>, id: u32) -> Result<(), String> {
     Ok(())
 }
 
+#[derive(Serialize)]
+struct LaunchInfo {
+    prog: String,
+    /// the prompt injected as the first user message (prompt-channel agents only)
+    initial_prompt: Option<String>,
+}
+
 #[tauri::command]
 fn launch_agent_embedded(
     app: tauri::AppHandle,
@@ -436,11 +463,11 @@ fn launch_agent_embedded(
     session_id: String,
     resume: bool,
     session_label: String,
-) -> Result<String, String> {
-    let (prog, args, cwd) = resolve_launch(&workspace_id, agent_override, &session_id, resume, &session_label)?;
+) -> Result<LaunchInfo, String> {
+    let spec = resolve_launch(&workspace_id, agent_override, &session_id, resume, &session_label)?;
     // agents are .cmd shims → must run under cmd; our args string is already
     // quoted, and portable-pty joins without re-quoting, so the line survives intact
-    let cmdline = if args.is_empty() { prog.clone() } else { format!("{prog} {args}") };
+    let cmdline = if spec.args.is_empty() { spec.prog.clone() } else { format!("{} {}", spec.prog, spec.args) };
     let pty = native_pty_system();
     // spawn at the terminal's real size — starting at 80x24 and resizing after
     // would make the agent draw two frames (the "duplicate display" artifact)
@@ -449,7 +476,7 @@ fn launch_agent_embedded(
         .map_err(|e| e.to_string())?;
     let mut cmd = CommandBuilder::new("cmd.exe");
     cmd.args(["/c", &cmdline]);
-    cmd.cwd(cwd);
+    cmd.cwd(&spec.cwd);
     let child = pair.slave.spawn_command(cmd).map_err(|e| e.to_string())?;
     let writer = pair.master.take_writer().map_err(|e| e.to_string())?;
     let mut reader = pair.master.try_clone_reader().map_err(|e| e.to_string())?;
@@ -468,7 +495,7 @@ fn launch_agent_embedded(
         let _ = app.emit(&exit_event, ());
     });
     sessions.lock().unwrap().insert(term_id, PtySession { writer, child, master: pair.master });
-    Ok(prog)
+    Ok(LaunchInfo { prog: spec.prog, initial_prompt: spec.initial_prompt })
 }
 
 // ---------- Tauri commands ----------
@@ -652,7 +679,7 @@ fn list_agents() -> Vec<AgentInfo> {
 /// Shared launch resolution: workspace → agent key → (prog, args, cwd), with
 /// an installed check so a missing agent fails cleanly instead of flashing a
 /// console.
-fn resolve_launch(workspace_id: &str, agent_override: Option<String>, session_id: &str, resume: bool, label: &str) -> Result<(String, String, String), String> {
+fn resolve_launch(workspace_id: &str, agent_override: Option<String>, session_id: &str, resume: bool, label: &str) -> Result<LaunchSpec, String> {
     let ws = load_workspaces()
         .into_iter()
         .find(|w| w.id == workspace_id)
@@ -663,17 +690,18 @@ fn resolve_launch(workspace_id: &str, agent_override: Option<String>, session_id
         .or(ws.agent.clone())
         .or(settings.default_agent)
         .ok_or("no agent selected and no default configured")?;
-    let (prog, args, cwd) = build_agent(&agent_key, &ws, session_id, resume, label)?;
-    if !on_path(&prog) {
-        return Err(format!("agent '{prog}' is not installed (not found on PATH)"));
+    let spec = build_agent(&agent_key, &ws, session_id, resume, label)?;
+    if !on_path(&spec.prog) {
+        return Err(format!("agent '{}' is not installed (not found on PATH)", spec.prog));
     }
-    Ok((prog, args, cwd))
+    Ok(spec)
 }
 
 #[tauri::command]
 fn launch_agent(workspace_id: String, agent_override: Option<String>) -> Result<String, String> {
     // external console: no session id, no label (fire-and-forget)
-    let (prog, args, cwd) = resolve_launch(&workspace_id, agent_override, "", false, "")?;
+    let spec = resolve_launch(&workspace_id, agent_override, "", false, "")?;
+    let (prog, args, cwd) = (spec.prog, spec.args, spec.cwd);
     // Build ONE command line and hand it to `cmd /c` verbatim. `Command::args`
     // would MSVC-quote the line (inner `"` become `\"`), and cmd's /c parser
     // then mangles it — raw_arg appends the line unquoted, which is exactly
@@ -712,7 +740,8 @@ fn launch_agent(workspace_id: String, agent_override: Option<String>) -> Result<
 /// doubling — cmd_safe already folded `"` to `'` in context text).
 #[tauri::command]
 fn launch_agent_ps(workspace_id: String, agent_override: Option<String>) -> Result<String, String> {
-    let (prog, args, cwd) = resolve_launch(&workspace_id, agent_override, "", false, "")?;
+    let spec = resolve_launch(&workspace_id, agent_override, "", false, "")?;
+    let (prog, args, cwd) = (spec.prog, spec.args, spec.cwd);
     fn psq(s: &str) -> String {
         format!("'{}'", s.replace('\'', "''"))
     }
@@ -897,7 +926,7 @@ mod tests {
     fn agent_args_have_balanced_quotes() {
         let w = ws("n", "d");
         for agent in ["agent", "codex", "claude", "opencode", "pi"] {
-            let (_p, args, _c) = build_agent(agent, &w, "test-id", false, "").unwrap();
+            let args = build_agent(agent, &w, "test-id", false, "").unwrap().args;
             assert_eq!(args.matches('"').count() % 2, 0, "{agent}: unbalanced quotes: {args}");
         }
     }
@@ -905,23 +934,23 @@ mod tests {
     #[test]
     fn empty_context_adds_no_prompt_flag() {
         let w = ws("n", "");
-        let (_p, args, _c) = build_agent("claude", &w, "test-id", false, "").unwrap();
+        let args = build_agent("claude", &w, "test-id", false, "").unwrap().args;
         assert!(!args.contains("--append-system-prompt"), "no ctx arg: {args}");
     }
 
     #[test]
     fn session_id_assigned_at_launch_and_used_at_resume() {
         let w = ws("n", "d");
-        let (_p, fresh, _c) = build_agent("claude", &w, "my-id", false, "").unwrap();
+        let fresh = build_agent("claude", &w, "my-id", false, "").unwrap().args;
         assert!(fresh.contains("--session-id \"my-id\""), "fresh assigns id: {fresh}");
-        let (_p, res, _c) = build_agent("claude", &w, "my-id", true, "").unwrap();
+        let res = build_agent("claude", &w, "my-id", true, "").unwrap().args;
         assert!(res.contains("--resume \"my-id\""), "resume uses id: {res}");
         assert!(!res.contains("--append-system-prompt"), "resume skips context: {res}");
         // pi uses the same flag for both
-        let (_p, pi_fresh, _c) = build_agent("pi", &w, "my-id", false, "").unwrap();
+        let pi_fresh = build_agent("pi", &w, "my-id", false, "").unwrap().args;
         assert!(pi_fresh.contains("--session-id \"my-id\""), "pi fresh: {pi_fresh}");
         // external launches pass an empty id → no session assignment
-        let (_p, ext, _c) = build_agent("claude", &w, "", false, "").unwrap();
+        let ext = build_agent("claude", &w, "", false, "").unwrap().args;
         assert!(!ext.contains("--session-id"), "external: {ext}");
     }
 
@@ -930,10 +959,10 @@ mod tests {
         // a described file triggers the pointer-prompt path
         let mut w = ws("my-ws", "");
         w.files = vec![Project { path: "E:/spec.md".into(), description: "d".into() }];
-        let (_p, args, _c) = build_agent("codex", &w, "id", false, "codex 1").unwrap();
+        let args = build_agent("codex", &w, "id", false, "codex 1").unwrap().args;
         assert!(args.contains("Workspace 'my-ws [codex 1]':"), "pointer leads with name+label: {args}");
         // pi gets a real session name including the label
-        let (_p, pi_args, _c) = build_agent("pi", &w, "id", false, "claude 2").unwrap();
+        let pi_args = build_agent("pi", &w, "id", false, "claude 2").unwrap().args;
         assert!(pi_args.contains("--name \"my-ws") && pi_args.contains("claude 2\""), "pi named with label: {pi_args}");
     }
 
