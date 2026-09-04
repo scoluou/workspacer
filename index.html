@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>workspacer</title>
+  <style>
+    :root {
+      --bg: #1b1d21;
+      --bg-sidebar: #16181b;
+      --bg-raised: #212428;
+      --bg-hover: #26292e;
+      --bg-active: #2b2f35;
+      --border: #2c2f34;
+      --border-subtle: #26282c;
+      --text: #d4d6da;
+      --text-dim: #8a8f98;
+      --text-faint: #5c6169;
+      --accent: #4f8cff;
+      --accent-dim: rgba(79, 140, 255, 0.14);
+      --danger: #e5534b;
+      --green: #4ac26b;
+      --radius: 6px;
+      /* Cursor/VS Code editor default (Consolas, Courier New) with an explicit
+         CJK floor: Courier New has no CJK, so 中文 lands on YaHei (tight,
+         proportional) instead of whatever the OS font-linking picks. Maple
+         Mono NF CN stays available as an explicit choice in settings. */
+      --font: Consolas, "Courier New", "Microsoft YaHei", -apple-system, "Segoe UI", "Inter", sans-serif;
+      --mono: Consolas, "Courier New", "Microsoft YaHei", "Cascadia Code", "JetBrains Mono", monospace;
+    }
+    [data-theme="light"] {
+      --bg: #ffffff; --bg-sidebar: #f3f4f6; --bg-raised: #ffffff;
+      --bg-hover: #e9ebef; --bg-active: #dde3ea;
+      --border: #d4d7dc; --border-subtle: #e7eaee;
+      --text: #1f2328; --text-dim: #5c6169; --text-faint: #8a8f98;
+      --accent: #3b76e1; --accent-dim: rgba(59, 118, 225, 0.12);
+      --danger: #d13438; --green: #1a7f37;
+    }
+    [data-theme="dracula"] {
+      --bg: #282a36; --bg-sidebar: #21222c; --bg-raised: #2e3040;
+      --bg-hover: #343746; --bg-active: #44475a;
+      --border: #44475a; --border-subtle: #3a3c4e;
+      --text: #f8f8f2; --text-dim: #bfc4d6; --text-faint: #6272a4;
+      --accent: #bd93f9; --accent-dim: rgba(189, 147, 249, 0.16);
+      --danger: #ff5555; --green: #50fa7b;
+    }
+    @font-face {
+      font-family: "Maple Mono NF CN";
+      src: url("/fonts/MapleMono-NF-CN-Regular.woff2") format("woff2");
+      font-weight: 400;
+      font-style: normal;
+      font-display: swap;
+    }
+    @font-face {
+      font-family: "Maple Mono NF CN";
+      src: url("/fonts/MapleMono-NF-CN-Bold.woff2") format("woff2");
+      font-weight: 700;
+      font-style: normal;
+      font-display: swap;
+    }
+    * { box-sizing: border-box; }
+    html { font-size: var(--font-size, 13px); }
+    html, body { height: 100%; }
+    body {
+      font-family: var(--font); font-weight: var(--font-weight, 400);
+      margin: 0; background: var(--bg); color: var(--text);
+      font-size: 1rem; line-height: 1.5; -webkit-font-smoothing: antialiased;
+      overflow: hidden;
+    }
+
+    .layout { display: flex; height: 100vh; }
+
+    /* ---- sidebar ---- */
+    .sidebar {
+      width: 232px; flex: 0 0 232px; background: var(--bg-sidebar);
+      border-right: 1px solid var(--border-subtle);
+      display: flex; flex-direction: column; overflow: hidden;
+    }
+    .sidebar-head {
+      padding: 14px 16px; font-size: 0.92rem; font-weight: 600;
+      color: var(--text-dim); letter-spacing: 0.02em;
+      display: flex; align-items: center; gap: 8px;
+      cursor: pointer;
+    }
+    .sidebar-head:hover { color: var(--text); }
+    .logo-dot {
+      width: 18px; height: 18px; border-radius: 5px;
+      background: linear-gradient(135deg, var(--accent), #8b5cf6);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 0.85rem; font-weight: 700; color: #fff;
+    }
+    .sidebar-section { padding: 8px 8px 4px; font-size: 0.85rem; font-weight: 600; color: var(--text-faint); letter-spacing: 0.02em; }
+    .ws-nav { flex: 1; overflow-y: auto; padding: 0 8px 12px; }
+    .ws-nav-item {
+      padding: 6px 10px; border-radius: var(--radius); cursor: pointer;
+      color: var(--text-dim); font-size: 1rem; margin-bottom: 1px;
+      display: flex; align-items: center; gap: 8px;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .ws-nav-item:hover { background: var(--bg-hover); color: var(--text); }
+    .ws-nav-item, .proj-item { cursor: grab; }
+    .ws-nav-item, .proj-item { touch-action: pan-y; }
+    .ws-nav-item.dragging, .proj-item.dragging {
+      opacity: 1; background: rgba(79, 140, 255, 0.30);
+      box-shadow: inset 0 0 0 1.5px var(--accent), 0 6px 16px rgba(0, 0, 0, 0.45);
+      border-radius: 6px; transform: scale(1.02);
+      position: relative; z-index: 10;
+    }
+    .ws-nav-item.drag-over, .proj-item.drag-over { box-shadow: inset 0 2px 0 var(--accent); }
+    .ws-nav-item.drag-over-end, .proj-item.drag-over-end { box-shadow: inset 0 -2px 0 var(--accent); }
+    .sidebar.drop-hint, .main.drop-hint { outline: 2px dashed var(--accent); outline-offset: -2px; }
+    #trashDrop {
+      position: fixed; right: 24px; bottom: 56px; z-index: 60;
+      width: 56px; height: 56px; border-radius: 50%;
+      display: flex; align-items: center; justify-content: center; font-size: 1.5rem;
+      background: var(--bg-raised); border: 2px dashed var(--border-strong, #3a3e45);
+      opacity: 0; pointer-events: none; transform: scale(0.8); transition: all 0.15s;
+    }
+    #trashDrop.show { opacity: 1; transform: scale(1); }
+    #trashDrop.drag-over { border-color: var(--danger); background: var(--danger); transform: scale(1.12); }
+    .ws-nav-item.active { background: var(--bg-active); color: var(--text); }
+    .ws-launch {
+      margin-left: auto;
+      border: none; background: none; color: var(--green); cursor: pointer;
+      font-size: 0.72rem; padding: 2px 5px; border-radius: 4px; flex: 0 0 auto; line-height: 1;
+    }
+    .ws-launch:hover { color: #fff; background: var(--green); }
+    .sidebar-foot { padding: 10px 12px; border-top: 1px solid var(--border-subtle); }
+
+    /* ---- main ---- */
+    .splitter {
+      flex: 0 0 5px; cursor: col-resize; touch-action: none;
+      margin-left: -3px; z-index: 5; position: relative;
+    }
+    .splitter:hover, .splitter.dragging { background: var(--accent-dim, rgba(79,140,255,0.25)); }
+    .main { flex: 1; overflow-y: auto; padding: 24px 28px 60px; }
+    .main-head { margin-bottom: 20px; }
+    .main-head h1 { font-size: 1.54rem; font-weight: 600; margin: 0 0 4px; letter-spacing: -0.01em; }
+    .main-head p { margin: 0; color: var(--text-dim); font-size: 1rem; }
+
+    .card {
+      background: var(--bg-raised); border: 1px solid var(--border);
+      border-radius: 8px; padding: 16px; margin-bottom: 16px;
+    }
+
+    .field { margin-bottom: 14px; }
+    .field:last-child { margin-bottom: 0; }
+    .field > label { display: block; font-size: 0.92rem; color: var(--text-dim); margin-bottom: 6px; font-weight: 500; }
+
+    input[type=text], textarea, select {
+      font-family: var(--font); width: 100%;
+      background: var(--bg); border: 1px solid var(--border);
+      color: var(--text); padding: 6px 10px; border-radius: var(--radius);
+      font-size: 1rem; outline: none; transition: border-color 0.12s, background 0.12s;
+    }
+    input[type=text]:hover, textarea:hover, select:hover { border-color: var(--border-strong, #3a3e45); }
+    input[type=text]:focus, textarea:focus, select:focus { border-color: var(--accent); background: var(--bg); }
+    textarea { resize: vertical; min-height: 56px; font-family: var(--font); }
+    select { cursor: pointer; }
+    .mono { font-family: var(--mono); }
+
+    .btn {
+      font-family: var(--font); border: 1px solid var(--border); border-radius: var(--radius);
+      padding: 6px 13px; font-size: 1rem; cursor: pointer; transition: all 0.12s;
+      background: var(--bg-active); color: var(--text); font-weight: 500;
+    }
+    .btn:hover { background: var(--bg-hover); border-color: #3a3e45; }
+    .btn-primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+    .btn-primary:hover { background: #6296ff; border-color: #6296ff; }
+    .btn-primary:disabled { opacity: 0.45; cursor: not-allowed; }
+    .btn-ghost { background: transparent; color: var(--text-dim); }
+    .btn-ghost:hover { color: var(--text); background: var(--bg-hover); }
+    .btn-danger { background: transparent; border-color: transparent; color: var(--text-faint); }
+    .btn-danger:hover { color: var(--danger); background: rgba(229,83,75,0.1); }
+    .btn-sm { padding: 4px 9px; font-size: 0.92rem; }
+
+    /* project rows */
+    .proj-row { display: flex; gap: 8px; margin-bottom: 8px; align-items: center; }
+    .proj-row .path {
+      flex: 0 0 44%; font-family: var(--mono); font-size: 0.92rem; color: var(--text-dim);
+      background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius);
+      padding: 6px 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .proj-row input { flex: 1; }
+    .proj-empty { color: var(--text-faint); font-size: 0.92rem; padding: 8px 0; }
+
+    /* workspace detail */
+    .ws-detail-head { display: flex; align-items: center; gap: 12px; margin-bottom: 4px; }
+    .ws-detail-head h1 { flex: 1; }
+    .chip { font-size: 0.85rem; color: var(--accent); background: var(--accent-dim); padding: 2px 9px; border-radius: 20px; font-weight: 500; }
+    .proj-list { display: flex; flex-direction: column; }
+    .file-group { margin-left: 24px; }
+    .collapsible { cursor: pointer; user-select: none; }
+    .collapsible:hover label { color: var(--text); }
+    .proj-item {
+      display: flex; align-items: center; gap: 12px; padding: 10px 4px;
+      border-bottom: 1px solid var(--border-subtle);
+    }
+    .proj-item:last-child { border-bottom: none; }
+    .proj-item .ico { color: var(--text-faint); flex: 0 0 auto; }
+    .proj-item .p { font-family: var(--mono); font-size: 0.96rem; color: var(--text); }
+    .proj-item .d { color: var(--text-faint); font-size: 0.92rem; margin-left: auto; text-align: right; }
+
+    /* inline edit */
+    .editable { cursor: text; border-radius: 4px; padding: 1px 4px; margin: -1px -4px; transition: background 0.12s; }
+    .editable:hover { background: var(--bg-hover); }
+    .editable.empty-val { color: var(--text-faint); font-style: italic; }
+    .editable.empty-val::before { content: attr(data-placeholder); }
+    input.inline-edit {
+      font-family: inherit; font-size: inherit; color: inherit;
+      background: var(--bg); border: 1px solid var(--accent); border-radius: 4px;
+      padding: 1px 4px; margin: -1px -4px; outline: none; width: auto; min-width: 200px;
+    }
+    /* keep the project-description editor where the right-aligned text was */
+    .proj-item input.inline-edit { margin-left: auto; text-align: right; }
+    .ws-desc-edit { display: inline-block; min-width: 60px; }
+
+    /* context menu */
+    .ctx-menu {
+      position: fixed; z-index: 1000; min-width: 160px;
+      background: var(--bg-raised); border: 1px solid var(--border-strong, #3a3e45);
+      border-radius: 8px; padding: 4px; box-shadow: 0 8px 24px rgba(0,0,0,0.45);
+    }
+    .ctx-item {
+      padding: 6px 12px; border-radius: 5px; font-size: 0.92rem; color: var(--text);
+      cursor: pointer; display: flex; align-items: center; gap: 8px;
+    }
+    .ctx-item:hover { background: var(--accent); color: #fff; }
+
+    /* modal dialog (in-app only; native alert/confirm/prompt ignore the theme) */
+    .modal-overlay { position: fixed; inset: 0; z-index: 1100; background: rgba(0,0,0,0.5); display: flex; align-items: center; justify-content: center; }
+    .modal { background: var(--bg-raised); border: 1px solid var(--border); border-radius: 8px; padding: 16px; width: 380px; max-width: calc(100vw - 48px); box-shadow: 0 12px 32px rgba(0,0,0,0.5); }
+    .modal-title { font-size: 1.05rem; font-weight: 600; margin-bottom: 6px; word-break: break-all; }
+    .modal-body { color: var(--text-dim); font-size: 0.96rem; }
+    .modal-input { margin-top: 10px; }
+    .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
+    .btn-danger-solid { background: var(--danger); border-color: var(--danger); color: #fff; }
+    .btn-danger-solid:hover { filter: brightness(1.12); }
+
+    .launch-bar { display: flex; align-items: center; gap: 10px; margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--border-subtle); }
+    .launch-bar select { width: auto; }
+    .launch-bar .spacer { flex: 1; }
+
+    .empty { text-align: center; color: var(--text-faint); padding: 60px 0; font-size: 1rem; }
+
+    /* ---- settings page ---- */
+    .settings-nav-item { display: flex; align-items: center; gap: 8px; }
+    .settings-group { margin-bottom: 28px; }
+    .settings-group-title { font-size: 0.92rem; font-weight: 600; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.05em; margin: 0 0 4px; padding-bottom: 8px; border-bottom: 1px solid var(--border-subtle); }
+    .setting-row { display: flex; align-items: center; gap: 16px; padding: 12px 0; border-bottom: 1px solid var(--border-subtle); }
+    .setting-row:last-child { border-bottom: none; }
+    .setting-label { flex: 1; min-width: 0; }
+    .setting-label .name { font-size: 1rem; color: var(--text); }
+    .setting-label .hint { font-size: 0.92rem; color: var(--text-faint); margin-top: 2px; }
+    .setting-control { flex: 0 0 auto; width: 240px; }
+    .setting-control select, .setting-control input { width: 100%; }
+    /* toggle switch */
+    .toggle { position: relative; width: 36px; height: 20px; flex: 0 0 auto; }
+    .toggle input { opacity: 0; width: 0; height: 0; }
+    .toggle .track { position: absolute; inset: 0; background: var(--bg-active); border: 1px solid var(--border); border-radius: 20px; transition: background 0.15s; }
+    .toggle .track::after { content: ""; position: absolute; top: 2px; left: 2px; width: 14px; height: 14px; border-radius: 50%; background: var(--text-dim); transition: transform 0.15s, background 0.15s; }
+    .toggle input:checked + .track { background: var(--accent); border-color: var(--accent); }
+    .toggle input:checked + .track::after { transform: translateX(16px); background: #fff; }
+    #status { position: fixed; bottom: 14px; left: 50%; transform: translateX(-50%); font-size: 0.92rem; color: var(--green); background: var(--bg-raised); border: 1px solid var(--border); padding: 6px 14px; border-radius: 20px; opacity: 0; transition: opacity 0.2s; pointer-events: none; }
+    #status.show { opacity: 1; }
+    #status.err { color: var(--danger); }
+
+    ::-webkit-scrollbar { width: 10px; height: 10px; }
+    ::-webkit-scrollbar-thumb { background: #33373d; border-radius: 6px; border: 2px solid var(--bg); }
+    ::-webkit-scrollbar-thumb:hover { background: #3f444b; }
+    ::-webkit-scrollbar-track { background: transparent; }
+  </style>
+</head>
+<body>
+  <div class="layout">
+    <aside class="sidebar">
+      <div class="sidebar-head">
+        <div class="logo-dot">W</div>
+        <span>workspacer</span>
+      </div>
+      <div class="sidebar-section" id="sidebarSection">Workspaces</div>
+      <nav class="ws-nav" id="wsNav"></nav>
+      <div class="sidebar-foot">
+        <div class="ws-nav-item settings-nav-item" id="settingsNav" style="margin:0;">
+          <span>⚙</span><span id="settingsLabel">Settings</span>
+        </div>
+      </div>
+    </aside>
+
+    <div class="splitter" id="splitter" title=""></div>
+    <main class="main" id="main"></main>
+  </div>
+  <div id="trashDrop">🗑</div>
+  <div id="status"></div>
+
+  <script type="module" src="/src/main.ts"></script>
+</body>
+</html>
