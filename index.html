@@ -159,7 +159,9 @@
     .agent-ws { color: var(--text-faint); }
     /* embedded terminal (prototype) */
     .term-wrap { display: flex; flex-direction: row; height: 100%; }
-    .conv-bar { flex: 0 0 220px; border-left: 1px solid var(--border-subtle); overflow-y: auto; background: var(--bg-sidebar); }
+    .conv-bar { border-left: 1px solid var(--border-subtle); overflow-y: auto; background: var(--bg-sidebar); flex: 0 0 auto; }
+    .conv-resize { flex: 0 0 5px; cursor: col-resize; touch-action: none; }
+    .conv-resize:hover { background: var(--accent-dim); }
     .conv-head { padding: 8px 10px; font-size: 0.85rem; font-weight: 600; color: var(--text-faint); }
     .conv-item { padding: 6px 10px; font-size: 0.88rem; color: var(--text-dim); cursor: pointer; border-bottom: 1px solid var(--border-subtle); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .conv-item:hover { background: var(--bg-hover); color: var(--text); }

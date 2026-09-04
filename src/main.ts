@@ -521,7 +521,11 @@ function renderNav() {
     item.addEventListener("click", () => {
       if (Date.now() < suppressClickUntil) return; // just finished dragging, not a navigation click
       ensureTab(ws.id);
-      view = { kind: "workspace", id: ws.id };
+      // with agent tabs around, jump to the most recently used one; the
+      // workspace tab itself stays on the project page
+      const order = orderOf(ws.id);
+      const last = lastTermByWs.get(ws.id) ?? (order.length ? order[order.length - 1] : undefined);
+      view = last !== undefined && termSessions.has(last) ? { kind: "terminal", id: String(last) } : { kind: "workspace", id: ws.id };
       render();
     });
     item.addEventListener("contextmenu", (e) => {
@@ -627,6 +631,7 @@ function wireSubTabbar(wsId: string) {
     el.addEventListener("click", (e) => {
       if (Date.now() < suppressClickUntil) return;
       if ((e.target as HTMLElement).closest(".tab-close, .tab-pin")) return;
+      lastTermByWs.set(wsId, tid);
       view = { kind: "terminal", id: String(tid) };
       render();
     });
@@ -715,8 +720,10 @@ function wireTabbar() {
     })
   );
 }
+let convBarWidth = 220; // session-scoped; drag the handle to resize
+
 function terminalHtml(): string {
-  return `<div class="term-wrap"><div class="term-host" id="termHost"></div><div class="conv-bar" id="convBar"></div></div>`;
+  return `<div class="term-wrap"><div class="term-host" id="termHost"></div><div class="conv-resize" id="convResize"></div><div class="conv-bar" id="convBar" style="width:${convBarWidth}px"></div></div>`;
 }
 
 // aggregate view: every live/exited terminal session across workspaces
@@ -767,8 +774,30 @@ function wireTerminal(termId: number) {
   } else {
     startTerminal(sess); // first activation: open xterm + spawn/resume the PTY
   }
+  // conversation bar width: drag the handle at its left edge
+  const handle = $("convResize");
+  handle?.addEventListener("pointerdown", (e) => {
+    e.preventDefault();
+    handle.setPointerCapture(e.pointerId);
+    const onMove = (ev: PointerEvent) => {
+      const right = handle.parentElement!.getBoundingClientRect().right;
+      convBarWidth = Math.min(400, Math.max(140, Math.round(right - ev.clientX)));
+      $("convBar").style.width = convBarWidth + "px";
+    };
+    const onUp = () => {
+      handle.removeEventListener("pointermove", onMove);
+      handle.removeEventListener("pointerup", onUp);
+      handle.removeEventListener("pointercancel", onUp);
+    };
+    handle.addEventListener("pointermove", onMove);
+    handle.addEventListener("pointerup", onUp);
+    handle.addEventListener("pointercancel", onUp);
+  });
 }
 
+// conversation bar: every prompt the user submitted in this terminal; click
+// scrolls the buffer to it (recorded line, with a text-search fallback since
+// TUI redraws shift lines)
 // conversation bar: every prompt the user submitted in this terminal; click
 // scrolls the buffer to it (recorded line, with a text-search fallback since
 // TUI redraws shift lines)
@@ -789,7 +818,9 @@ function renderConvBar(sess: TermSession) {
         target = -1;
         for (let i = buf.length - 1; i >= 0; i--) {
           const l = buf.getLine(i)?.translateToString().trim() ?? "";
-          if (l.includes(entry.text.slice(0, 24))) {
+          // the input echo line starts with the prompt; TUI picker titles
+          // merely contain it (that's what sent jumps to the top)
+          if (l === entry.text || l.startsWith(entry.text) || (entry.text.length >= 12 && l.includes(entry.text.slice(0, 24)))) {
             target = i;
             break;
           }
@@ -1260,6 +1291,7 @@ function activeWsId(): string | null {
 
 // terminal sub-tab order per workspace; sessions hold the runtime state
 const termOrder = new Map<string, number[]>(); // wsId -> [termId]
+const lastTermByWs = new Map<string, number>(); // wsId -> last active termId
 function orderOf(wsId: string): number[] {
   let o = termOrder.get(wsId);
   if (!o) {
@@ -1477,6 +1509,7 @@ async function openTerminal(ws: Workspace, opts: { activate?: boolean; sessionId
   } else {
     order.push(id);
   }
+  lastTermByWs.set(ws.id, id);
   if (opts.activate !== false) {
     view = { kind: "terminal", id: String(id) };
     render(); // wireTerminal → startTerminal

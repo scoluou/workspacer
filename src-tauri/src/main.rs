@@ -382,6 +382,7 @@ fn on_path(prog: &str) -> bool {
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use std::io::{Read, Write};
 use tauri::Emitter;
+use tauri::Manager;
 
 struct PtySession {
     writer: Box<dyn Write + Send>,
@@ -484,10 +485,32 @@ fn launch_agent_embedded(
     let exit_event = format!("term-exit-{term_id}");
     std::thread::spawn(move || {
         let mut buf = [0u8; 16384];
+        let mut read_failures = 0u32;
         loop {
             match reader.read(&mut buf) {
-                Ok(0) | Err(_) => break,
+                Ok(0) | Err(_) => {
+                    // ConPTY read can end while the child is alive (e.g. an
+                    // agent that reattaches to a shared daemon). Only declare
+                    // exit when the child is really gone.
+                    let really_exited = {
+                        let map = app.state::<PtyMap>();
+                        let mut g = map.lock().unwrap();
+                        match g.get_mut(&term_id) {
+                            Some(s) => matches!(s.child.try_wait(), Ok(Some(_)) | Err(_)),
+                            None => true, // killed via term_kill
+                        }
+                    };
+                    if really_exited {
+                        break;
+                    }
+                    read_failures += 1;
+                    if read_failures > 50 {
+                        break; // PTY truly broken; give up
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
                 Ok(n) => {
+                    read_failures = 0;
                     let _ = app.emit(&data_event, String::from_utf8_lossy(&buf[..n]).into_owned());
                 }
             }
