@@ -138,10 +138,18 @@ fn cmd_safe(s: &str) -> String {
 }
 
 /// Raw context summary lines (workspace desc, described projects, all files).
-fn context_parts(ws: &Workspace) -> Vec<String> {
+/// `label` distinguishes sessions of the same workspace in resume pickers.
+fn context_parts(ws: &Workspace, label: &str) -> Vec<String> {
     let mut parts = Vec::new();
-    if !ws.description.trim().is_empty() {
-        parts.push(format!("Workspace \"{}\": {}", ws.name, ws.description.trim()));
+    if !ws.description.trim().is_empty() || !label.is_empty() {
+        let mut first = format!("Workspace \"{}\"", ws.name);
+        if !label.is_empty() {
+            first.push_str(&format!(" [{label}]"));
+        }
+        if !ws.description.trim().is_empty() {
+            first.push_str(&format!(": {}", ws.description.trim()));
+        }
+        parts.push(first);
     }
     let described: Vec<&Project> = ws.projects.iter().filter(|p| !p.description.trim().is_empty()).collect();
     if !described.is_empty() {
@@ -173,8 +181,8 @@ fn context_parts(ws: &Workspace) -> Vec<String> {
 
 /// One-line, cmd-safe context for the command line (a raw newline would split
 /// the command and make the agent exit immediately).
-fn build_context(ws: &Workspace) -> String {
-    cmd_safe(&context_parts(ws).join(". ")).replace('\n', " ").replace('\r', "")
+fn build_context(ws: &Workspace, label: &str) -> String {
+    cmd_safe(&context_parts(ws, label).join(". ")).replace('\n', " ").replace('\r', "")
 }
 
 /// Content of a file worth inlining into the context doc: exists, <= 8 KiB,
@@ -189,8 +197,8 @@ fn read_inlineable_file(path: &str) -> Option<String> {
 
 /// Multi-line context document for file-based delivery: the summary lines plus
 /// inlined contents of small text files.
-fn build_context_doc(ws: &Workspace) -> String {
-    let mut doc = context_parts(ws).join("\n");
+fn build_context_doc(ws: &Workspace, label: &str) -> String {
+    let mut doc = context_parts(ws, label).join("\n");
     // only described files are injected (uniform rule), so only they get inlined
     for f in ws.files.iter().filter(|f| !f.description.trim().is_empty()) {
         if let Some(content) = read_inlineable_file(&f.path) {
@@ -207,7 +215,7 @@ fn build_context_doc(ws: &Workspace) -> String {
 /// Build (program, args, cwd) for a given agent over the workspace.
 /// Description injection: claude/pi use --append-system-prompt, codex/agent/
 /// opencode take it as the initial prompt.
-fn build_agent(agent: &str, ws: &Workspace, session_id: &str, resume: bool) -> Result<(String, String, String), String> {
+fn build_agent(agent: &str, ws: &Workspace, session_id: &str, resume: bool, label: &str) -> Result<(String, String, String), String> {
     let folders: Vec<&String> = ws.projects.iter().map(|p| &p.path).collect();
     // empty workspace: fall back to the user's home dir as cwd
     let primary = folders
@@ -235,7 +243,7 @@ fn build_agent(agent: &str, ws: &Workspace, session_id: &str, resume: bool) -> R
         return Ok((agent.into(), args.trim().to_string(), primary));
     }
 
-    let context = build_context(ws);
+    let context = build_context(ws, label);
     let has_ctx = !context.is_empty();
     // claude/pi let us assign the session id at launch → deterministic resume.
     // Only the embedded terminal path passes a real id; external windows are
@@ -250,7 +258,7 @@ fn build_agent(agent: &str, ws: &Workspace, session_id: &str, resume: bool) -> R
     // initial-prompt agents get a pointer prompt.
     let doc = if ws.files.iter().any(|f| !f.description.trim().is_empty()) {
         let path = std::env::temp_dir().join(format!("workspacer-ctx-{}.md", ws.id));
-        fs::write(&path, build_context_doc(ws)).map_err(|e| e.to_string())?;
+        fs::write(&path, build_context_doc(ws, label)).map_err(|e| e.to_string())?;
         Some(path)
     } else {
         None
@@ -259,9 +267,11 @@ fn build_agent(agent: &str, ws: &Workspace, session_id: &str, resume: bool) -> R
     // workspace name so session lists (resume pickers) can tell them apart.
     // single quotes only: the pointer travels quoted through cmd
     let pointer = doc.as_ref().map(|d| {
+        let label_part = if label.is_empty() { String::new() } else { format!(" [{}]", cmd_safe(label)) };
         format!(
-            "Workspace '{}': context file at {}. Read it first for project descriptions and attached file contents.",
+            "Workspace '{}{}': context file at {}. Read it first for project descriptions and attached file contents.",
             cmd_safe(&ws.name),
+            label_part,
             d.display()
         )
     });
@@ -307,7 +317,12 @@ fn build_agent(agent: &str, ws: &Workspace, session_id: &str, resume: bool) -> R
         }
         "pi" => {
             // --name makes the session recognizable in pi's resume picker
-            let mut args = format!("{}--name {} ", sid, quote(&cmd_safe(&ws.name)));
+            let display_name = if label.is_empty() {
+                cmd_safe(&ws.name)
+            } else {
+                format!("{} · {}", cmd_safe(&ws.name), cmd_safe(label))
+            };
+            let mut args = format!("{}--name {} ", sid, quote(&display_name));
             if let Some(d) = &doc {
                 // pi reads the file when the value is an existing path
                 args.push_str(&format!("--append-system-prompt {}", quote(&d.display().to_string())));
@@ -420,8 +435,9 @@ fn launch_agent_embedded(
     rows: u16,
     session_id: String,
     resume: bool,
+    session_label: String,
 ) -> Result<String, String> {
-    let (prog, args, cwd) = resolve_launch(&workspace_id, agent_override, &session_id, resume)?;
+    let (prog, args, cwd) = resolve_launch(&workspace_id, agent_override, &session_id, resume, &session_label)?;
     // agents are .cmd shims → must run under cmd; our args string is already
     // quoted, and portable-pty joins without re-quoting, so the line survives intact
     let cmdline = if args.is_empty() { prog.clone() } else { format!("{prog} {args}") };
@@ -636,7 +652,7 @@ fn list_agents() -> Vec<AgentInfo> {
 /// Shared launch resolution: workspace → agent key → (prog, args, cwd), with
 /// an installed check so a missing agent fails cleanly instead of flashing a
 /// console.
-fn resolve_launch(workspace_id: &str, agent_override: Option<String>, session_id: &str, resume: bool) -> Result<(String, String, String), String> {
+fn resolve_launch(workspace_id: &str, agent_override: Option<String>, session_id: &str, resume: bool, label: &str) -> Result<(String, String, String), String> {
     let ws = load_workspaces()
         .into_iter()
         .find(|w| w.id == workspace_id)
@@ -647,7 +663,7 @@ fn resolve_launch(workspace_id: &str, agent_override: Option<String>, session_id
         .or(ws.agent.clone())
         .or(settings.default_agent)
         .ok_or("no agent selected and no default configured")?;
-    let (prog, args, cwd) = build_agent(&agent_key, &ws, session_id, resume)?;
+    let (prog, args, cwd) = build_agent(&agent_key, &ws, session_id, resume, label)?;
     if !on_path(&prog) {
         return Err(format!("agent '{prog}' is not installed (not found on PATH)"));
     }
@@ -656,8 +672,8 @@ fn resolve_launch(workspace_id: &str, agent_override: Option<String>, session_id
 
 #[tauri::command]
 fn launch_agent(workspace_id: String, agent_override: Option<String>) -> Result<String, String> {
-    // external console: no session id (fire-and-forget)
-    let (prog, args, cwd) = resolve_launch(&workspace_id, agent_override, "", false)?;
+    // external console: no session id, no label (fire-and-forget)
+    let (prog, args, cwd) = resolve_launch(&workspace_id, agent_override, "", false, "")?;
     // Build ONE command line and hand it to `cmd /c` verbatim. `Command::args`
     // would MSVC-quote the line (inner `"` become `\"`), and cmd's /c parser
     // then mangles it — raw_arg appends the line unquoted, which is exactly
@@ -696,7 +712,7 @@ fn launch_agent(workspace_id: String, agent_override: Option<String>) -> Result<
 /// doubling — cmd_safe already folded `"` to `'` in context text).
 #[tauri::command]
 fn launch_agent_ps(workspace_id: String, agent_override: Option<String>) -> Result<String, String> {
-    let (prog, args, cwd) = resolve_launch(&workspace_id, agent_override, "", false)?;
+    let (prog, args, cwd) = resolve_launch(&workspace_id, agent_override, "", false, "")?;
     fn psq(s: &str) -> String {
         format!("'{}'", s.replace('\'', "''"))
     }
@@ -870,7 +886,7 @@ mod tests {
     #[test]
     fn context_strips_cmd_metachars() {
         // a description like this used to break the cmd /c launch line entirely
-        let c = build_context(&ws("my \"ws\"", "a & b | c <d> ^ 100% !x!"));
+        let c = build_context(&ws("my \"ws\"", "a & b | c <d> ^ 100% !x!"), "");
         for ch in ['"', '&', '|', '<', '>', '^', '%', '!'] {
             assert!(!c.contains(ch), "context contains cmd-special {ch:?}: {c}");
         }
@@ -881,7 +897,7 @@ mod tests {
     fn agent_args_have_balanced_quotes() {
         let w = ws("n", "d");
         for agent in ["agent", "codex", "claude", "opencode", "pi"] {
-            let (_p, args, _c) = build_agent(agent, &w, "test-id", false).unwrap();
+            let (_p, args, _c) = build_agent(agent, &w, "test-id", false, "").unwrap();
             assert_eq!(args.matches('"').count() % 2, 0, "{agent}: unbalanced quotes: {args}");
         }
     }
@@ -889,23 +905,23 @@ mod tests {
     #[test]
     fn empty_context_adds_no_prompt_flag() {
         let w = ws("n", "");
-        let (_p, args, _c) = build_agent("claude", &w, "test-id", false).unwrap();
+        let (_p, args, _c) = build_agent("claude", &w, "test-id", false, "").unwrap();
         assert!(!args.contains("--append-system-prompt"), "no ctx arg: {args}");
     }
 
     #[test]
     fn session_id_assigned_at_launch_and_used_at_resume() {
         let w = ws("n", "d");
-        let (_p, fresh, _c) = build_agent("claude", &w, "my-id", false).unwrap();
+        let (_p, fresh, _c) = build_agent("claude", &w, "my-id", false, "").unwrap();
         assert!(fresh.contains("--session-id \"my-id\""), "fresh assigns id: {fresh}");
-        let (_p, res, _c) = build_agent("claude", &w, "my-id", true).unwrap();
+        let (_p, res, _c) = build_agent("claude", &w, "my-id", true, "").unwrap();
         assert!(res.contains("--resume \"my-id\""), "resume uses id: {res}");
         assert!(!res.contains("--append-system-prompt"), "resume skips context: {res}");
         // pi uses the same flag for both
-        let (_p, pi_fresh, _c) = build_agent("pi", &w, "my-id", false).unwrap();
+        let (_p, pi_fresh, _c) = build_agent("pi", &w, "my-id", false, "").unwrap();
         assert!(pi_fresh.contains("--session-id \"my-id\""), "pi fresh: {pi_fresh}");
         // external launches pass an empty id → no session assignment
-        let (_p, ext, _c) = build_agent("claude", &w, "", false).unwrap();
+        let (_p, ext, _c) = build_agent("claude", &w, "", false, "").unwrap();
         assert!(!ext.contains("--session-id"), "external: {ext}");
     }
 
@@ -914,16 +930,16 @@ mod tests {
         // a described file triggers the pointer-prompt path
         let mut w = ws("my-ws", "");
         w.files = vec![Project { path: "E:/spec.md".into(), description: "d".into() }];
-        let (_p, args, _c) = build_agent("codex", &w, "id", false).unwrap();
-        assert!(args.contains("Workspace 'my-ws':"), "pointer leads with name: {args}");
-        // pi gets a real session name
-        let (_p, pi_args, _c) = build_agent("pi", &w, "id", false).unwrap();
-        assert!(pi_args.contains("--name \"my-ws\""), "pi named: {pi_args}");
+        let (_p, args, _c) = build_agent("codex", &w, "id", false, "codex 1").unwrap();
+        assert!(args.contains("Workspace 'my-ws [codex 1]':"), "pointer leads with name+label: {args}");
+        // pi gets a real session name including the label
+        let (_p, pi_args, _c) = build_agent("pi", &w, "id", false, "claude 2").unwrap();
+        assert!(pi_args.contains("--name \"my-ws") && pi_args.contains("claude 2\""), "pi named with label: {pi_args}");
     }
 
     #[test]
     fn unknown_agent_errors() {
-        assert!(build_agent("nope", &ws("n", ""), "x", false).is_err());
+        assert!(build_agent("nope", &ws("n", ""), "x", false, "").is_err());
     }
 
     #[test]
@@ -948,7 +964,7 @@ mod tests {
             Project { path: big.to_string_lossy().into(), description: "b".into() },
             Project { path: bin.to_string_lossy().into(), description: "x".into() },
         ];
-        let doc = build_context_doc(&w);
+        let doc = build_context_doc(&w, "");
         assert!(doc.contains("hello 内容"), "small file inlined");
         assert!(doc.contains(&format!("--- {} (s) ---", small.to_string_lossy())), "section header: {doc}");
         assert!(!doc.contains(&"x".repeat(9000)), "big file content not inlined");
@@ -998,7 +1014,7 @@ mod tests {
                 Project { path: "https://nodesc.com".into(), description: "".into() },
             ],
         };
-        let c = build_context(&w);
+        let c = build_context(&w, "");
         assert!(!c.contains('\n'), "single line: {c}");
         assert!(!c.contains(":;"), "no header/item seam: {c}");
         assert!(c.contains("Projects in this workspace: E:/a (da)"), "format: {c}");
