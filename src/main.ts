@@ -170,7 +170,7 @@ const DICT: Record<string, Record<string, string>> = {
     noAgents: "没有运行中的 agent",
     statusRunning: "运行中",
     statusExited: "已退出",
-    projectTab: "项目",
+    workspaceTab: "工作区",
     statusPending: "待恢复",
     convTitle: "对话记录",
     convEmpty: "还没有对话",
@@ -308,7 +308,7 @@ const DICT: Record<string, Record<string, string>> = {
     statusRunning: "Running",
     statusExited: "Exited",
     statusPending: "Pending",
-    projectTab: "Project",
+    workspaceTab: "Workspace",
     convTitle: "Conversation",
     convEmpty: "No messages yet",
   },
@@ -612,7 +612,7 @@ function subTabbarHtml(wsId: string): string {
   const activeId = view.kind === "terminal" ? Number((view as { id: string }).id) : null;
   const projActive = view.kind === "workspace" && (view as { id: string }).id === wsId;
   const seen = new Map<string, number>();
-  const projTab = `<div class="tab subtab-proj${projActive ? " active" : ""}" data-subproj="${wsId}"><span class="tab-label">📁 ${esc(t("projectTab"))}</span></div>`;
+  const projTab = `<div class="tab subtab-proj${projActive ? " active" : ""}" data-subproj="${wsId}"><span class="tab-label">🗂️ ${esc(t("workspaceTab"))}</span></div>`;
   const terms = ids
     .map((tid) => {
       const s = termSessions.get(tid);
