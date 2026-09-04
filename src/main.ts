@@ -578,13 +578,14 @@ function tabbarHtml(): string {
   const tabs = openTabs
     .map((tb) => {
       const name = workspaces.find((w) => w.id === tb.wsId)?.name ?? "?";
-      return `<div class="tab${tb.key === activeTop ? " active" : ""}" data-tab="${tb.key}"><span class="tab-label">${esc(name)}</span></div>`;
+      const tail = tb.pinned
+        ? `<span class="tab-close tab-pin" data-toppin="${tb.key}" title="${esc(t("unpin"))}">📌</span>`
+        : `<span class="tab-close" data-topclose="${tb.key}" title="${esc(t("closeTab"))}">✕</span>`;
+      return `<div class="tab${tb.key === activeTop ? " active" : ""}${tb.pinned ? " pinned" : ""}" data-tab="${tb.key}"><span class="tab-label">${esc(name)}</span>${tail}</div>`;
     })
     .join("");
   return `<div class="tabbar">${tabs}<div class="tab tab-agents${view.kind === "agents" ? " active" : ""}" data-tab="agents"><span class="tab-label">⚡ ${esc(t("agentsTab"))}${running ? ` (${running})` : ""}</span></div></div>`;
 }
-
-// sub-tab bar: the active workspace's terminal sessions
 function subTabbarHtml(wsId: string): string {
   const ids = orderOf(wsId);
   if (!ids.length) return "";
@@ -668,7 +669,35 @@ function wireTabbar() {
       }
       render();
     });
+    if (key === "agents") return; // fixed aggregate tab: no close/pin
+    el.addEventListener("auxclick", (e) => {
+      if (e.button === 1) closeTopTab(key); // middle click
+    });
+    el.addEventListener("contextmenu", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const tb = openTabs.find((x) => x.key === key);
+      if (!tb) return;
+      showCtxMenu(e.clientX, e.clientY, [
+        { label: t(tb.pinned ? "unpin" : "pin"), onClick: () => pinTopTab(key) },
+        ...(!tb.pinned ? [{ label: t("closeThis"), onClick: () => closeTopTab(key) }] : []),
+        { label: t("closeOthers"), onClick: () => closeOtherTopTabs(key) },
+        { label: t("closeAll"), onClick: () => closeAllTopTabs() },
+      ]);
+    });
   });
+  document.querySelectorAll<HTMLElement>("[data-topclose]").forEach((el) =>
+    el.addEventListener("click", (e) => {
+      e.stopPropagation();
+      closeTopTab((el as HTMLElement).dataset.topclose!);
+    })
+  );
+  document.querySelectorAll<HTMLElement>("[data-toppin]").forEach((el) =>
+    el.addEventListener("click", (e) => {
+      e.stopPropagation();
+      pinTopTab((el as HTMLElement).dataset.toppin!);
+    })
+  );
 }
 function terminalHtml(): string {
   return `<div class="term-wrap"><div class="term-host" id="termHost"></div></div>`;
@@ -1158,7 +1187,7 @@ function triggerWsDescEdit() {
 // opens a terminal SUB-tab under its workspace. Sub-tabs are not shared:
 // switching workspace hides (but keeps) the previous workspace's terminals.
 // A special "agents" top tab aggregates all live sessions across workspaces.
-interface Tab { key: string; wsId: string } // top level: workspaces only
+interface Tab { key: string; wsId: string; pinned?: boolean } // top level: workspaces only
 let openTabs: Tab[] = [];
 
 function ensureTab(wsId: string) {
@@ -1206,6 +1235,51 @@ function closeSubTabs(wsId: string, termIds: number[]) {
   }
   render();
 }
+// top-level (workspace) tab close/pin. Closing a workspace tab never kills its
+// terminals ? they keep running and stay reachable in the agents view.
+function closeTopTab(key: string) {
+  const i = openTabs.findIndex((tb) => tb.key === key);
+  if (i < 0) return;
+  const tb = openTabs[i];
+  if (tb.pinned) return;
+  openTabs.splice(i, 1);
+  if (view.kind === "workspace" && (view as { id: string }).id === tb.wsId) {
+    view = openTabs.length ? { kind: "workspace", id: openTabs[openTabs.length - 1].wsId } : { kind: "settings" };
+  }
+  render();
+}
+function closeOtherTopTabs(keepKey: string) {
+  openTabs = openTabs.filter((tb) => tb.pinned || tb.key === keepKey);
+  if (view.kind === "workspace" && !openTabs.some((tb) => tb.wsId === (view as { id: string }).id)) {
+    view = openTabs.length ? { kind: "workspace", id: openTabs[openTabs.length - 1].wsId } : { kind: "settings" };
+  }
+  render();
+}
+function closeAllTopTabs() {
+  openTabs = openTabs.filter((tb) => tb.pinned);
+  if (view.kind === "workspace" && !openTabs.some((tb) => tb.wsId === (view as { id: string }).id)) {
+    view = openTabs.length ? { kind: "workspace", id: openTabs[openTabs.length - 1].wsId } : { kind: "settings" };
+  }
+  render();
+}
+// pinned workspace tabs sort to the front
+function pinTopTab(key: string) {
+  const i = openTabs.findIndex((tb) => tb.key === key);
+  if (i < 0) return;
+  const tb = openTabs[i];
+  if (tb.pinned) {
+    tb.pinned = false;
+    render();
+    return;
+  }
+  tb.pinned = true;
+  openTabs.splice(i, 1);
+  let pos = 0;
+  while (pos < openTabs.length && openTabs[pos].pinned) pos++;
+  openTabs.splice(pos, 0, tb);
+  render();
+}
+
 function pinSubTab(wsId: string, termId: number) {
   const s = termSessions.get(termId);
   if (!s) return;
