@@ -141,7 +141,7 @@ const DICT: Record<string, Record<string, string>> = {
     undone: "已撤销",
     redone: "已恢复",
     nothingToUndo: "没有可撤销的操作",
-    closeTerminal: "关闭终端",
+    closeTab: "关闭标签页",
   },
   en: {
     workspaces: "Work Spaces",
@@ -254,7 +254,7 @@ const DICT: Record<string, Record<string, string>> = {
     undone: "Undone",
     redone: "Redone",
     nothingToUndo: "Nothing to undo",
-    closeTerminal: "Close terminal",
+    closeTab: "Close tab",
   },
 };
 
@@ -447,9 +447,10 @@ function renderNav() {
   if (workspaces.length === 0) {
     nav.innerHTML = `<div style="padding:8px 10px;color:var(--text-faint);font-size:0.92rem;">${esc(t("noWorkspaceYet"))}</div>`;
   }
+  const activeWsId = view.kind === "workspace" || view.kind === "terminal" ? view.id : null;
   workspaces.forEach((ws) => {
     const item = document.createElement("div");
-    item.className = "ws-nav-item" + (view.kind === "workspace" && view.id === ws.id ? " active" : "");
+    item.className = "ws-nav-item" + (activeWsId === ws.id ? " active" : "");
     item.innerHTML = `<span style="overflow:hidden;text-overflow:ellipsis;">${esc(ws.name)}</span><button class="ws-launch" title="${esc(t("launch"))}">▶</button>`;
     item.querySelector(".ws-launch")!.addEventListener("click", (e) => {
       e.stopPropagation(); // launch, not navigate
@@ -457,6 +458,7 @@ function renderNav() {
     });
     item.addEventListener("click", () => {
       if (Date.now() < suppressClickUntil) return; // just finished dragging, not a navigation click
+      ensureTab("workspace", ws.id);
       view = { kind: "workspace", id: ws.id };
       render();
     });
@@ -487,7 +489,12 @@ function renderNav() {
 
 // logo/title returns home: first workspace, or settings when there are none
 document.querySelector(".sidebar-head")!.addEventListener("click", () => {
-  view = workspaces.length ? { kind: "workspace", id: workspaces[0].id } : { kind: "settings" };
+  if (workspaces.length) {
+    ensureTab("workspace", workspaces[0].id);
+    view = { kind: "workspace", id: workspaces[0].id };
+  } else {
+    view = { kind: "settings" };
+  }
   render();
 });
 // right-click empty area of the workspace list: new workspace
@@ -504,52 +511,78 @@ $("settingsNav").addEventListener("click", () => {
 });
 
 // ---------- main router ----------
+function tabbarHtml(): string {
+  if (!openTabs.length) return "";
+  return `<div class="tabbar">${openTabs
+    .map((tb) => {
+      const active = view.kind === tb.kind && (view as { id?: string }).id === tb.wsId;
+      const name = workspaces.find((w) => w.id === tb.wsId)?.name ?? "?";
+      return `<div class="tab${active ? " active" : ""}" data-tab="${tb.key}"><span class="tab-label">${tb.kind === "terminal" ? "&gt;_ " : ""}${esc(name)}</span><span class="tab-close" data-close="${tb.key}" title="${esc(t("closeTab"))}">✕</span></div>`;
+    })
+    .join("")}</div>`;
+}
+
+function wireTabbar() {
+  document.querySelectorAll<HTMLElement>(".tab").forEach((el) => {
+    el.addEventListener("click", (e) => {
+      if ((e.target as HTMLElement).closest(".tab-close")) return;
+      const tb = openTabs.find((x) => x.key === el.dataset.tab);
+      if (tb) {
+        view = tabToView(tb);
+        render();
+      }
+    });
+    el.addEventListener("auxclick", (e) => {
+      if (e.button === 1) closeTab(el.dataset.tab!); // middle click
+    });
+  });
+  document.querySelectorAll<HTMLElement>(".tab-close").forEach((el) =>
+    el.addEventListener("click", (e) => {
+      e.stopPropagation();
+      closeTab(el.dataset.close!);
+    })
+  );
+}
+
+function terminalHtml(wsId: string): string {
+  return `<div class="term-wrap"><div class="term-host" id="termHost"></div></div>`;
+}
+
+function wireTerminal(wsId: string) {
+  const sess = termSessions.get(wsId);
+  if (!sess) return;
+  const host = $("termHost");
+  if (sess.el.parentElement !== host) host.appendChild(sess.el);
+  if (sess.term.element) sess.fit.fit();
+}
+
 function renderMain() {
   const main = $("main");
-  main.classList.toggle("main-flush", view.kind === "terminal");
+  let content: string;
+  let wire: () => void = () => {};
   if (view.kind === "create") {
-    main.innerHTML = createFormHtml();
-    wireCreateForm();
+    content = createFormHtml();
+    wire = wireCreateForm;
   } else if (view.kind === "settings") {
-    main.innerHTML = settingsHtml();
-    wireSettings();
+    content = settingsHtml();
+    wire = wireSettings;
   } else if (view.kind === "terminal") {
-    const wsId = view.id;
-    const name = workspaces.find((w) => w.id === wsId)?.name ?? "";
-    main.innerHTML = `
-    <div class="term-wrap">
-      <div class="term-bar">
-        <button class="btn btn-ghost btn-sm" id="termBack">← ${esc(t("back"))}</button>
-        <span class="term-title">${esc(name)}</span>
-        <span class="spacer"></span>
-        <button class="btn btn-ghost btn-sm" id="termKill" title="${esc(t("closeTerminal"))}">✕</button>
-      </div>
-      <div class="term-host" id="termHost"></div>
-    </div>`;
-    // re-attach a live session's DOM after any re-render
-    const sess = termSessions.get(wsId);
-    if (sess) {
-      const host = $("termHost");
-      if (sess.el.parentElement !== host) host.appendChild(sess.el);
-      if (sess.term.element) sess.fit.fit();
-    }
-    $("termBack").addEventListener("click", () => { view = { kind: "workspace", id: wsId }; render(); });
-    $("termKill").addEventListener("click", async () => {
-      const s = termSessions.get(wsId);
-      if (s) {
-        await invoke("term_kill", { id: s.id });
-        s.term.dispose();
-        termSessions.delete(wsId);
-      }
-      view = { kind: "workspace", id: wsId };
-      render();
-    });
+    content = terminalHtml(view.id);
+    wire = () => wireTerminal((view as { kind: "terminal"; id: string }).id);
   } else {
     const ws = workspaces.find((w) => w.id === (view as { id: string }).id);
-    if (!ws) { view = { kind: "settings" }; renderMain(); return; }
-    main.innerHTML = workspaceDetailHtml(ws);
-    wireWorkspaceDetail(ws);
+    if (!ws) {
+      view = fallbackView();
+      renderMain();
+      return;
+    }
+    content = workspaceDetailHtml(ws);
+    wire = () => wireWorkspaceDetail(ws);
   }
+  const flush = view.kind === "terminal";
+  main.innerHTML = `${tabbarHtml()}<div class="content-wrap${flush ? " content-flush" : ""}">${content}</div>`;
+  wireTabbar();
+  wire();
 }
 
 // ---------- settings page ----------
@@ -798,7 +831,7 @@ function wireCreateForm() {
     renderProjRows();
   });
   $("cancelBtn").addEventListener("click", () => {
-    view = workspaces.length ? { kind: "workspace", id: workspaces[0].id } : { kind: "settings" };
+    view = fallbackView();
     render();
   });
   $("createBtn").addEventListener("click", async () => {
@@ -810,6 +843,7 @@ function wireCreateForm() {
       const ws = await invoke<Workspace>("create_workspace", { name, description, agent, projects: [...pending] });
       setStatus(`${t("created")} "${ws.name}"`);
       await reload();
+      ensureTab("workspace", ws.id);
       view = { kind: "workspace", id: ws.id };
       render();
     } catch (err) { setStatus(`${t("createFailed")}：${err}`, true); }
@@ -914,6 +948,42 @@ function triggerWsDescEdit() {
   setTimeout(() => wsDescTrigger?.(), 0);
 }
 
+// ---------- tabs ----------
+// VS Code model: opening a workspace or launching a terminal opens a tab.
+// Closing a terminal tab kills its PTY session.
+interface Tab { key: string; kind: "workspace" | "terminal"; wsId: string; }
+let openTabs: Tab[] = [];
+
+function tabToView(tb: Tab): View {
+  return { kind: tb.kind, id: tb.wsId } as View;
+}
+function ensureTab(kind: "workspace" | "terminal", wsId: string) {
+  const key = `${kind}:${wsId}`;
+  if (!openTabs.some((tb) => tb.key === key)) openTabs.push({ key, kind, wsId });
+}
+function fallbackView(): View {
+  if (openTabs.length) return tabToView(openTabs[openTabs.length - 1]);
+  return workspaces.length ? { kind: "workspace", id: workspaces[0].id } : { kind: "settings" };
+}
+function closeTab(key: string) {
+  const i = openTabs.findIndex((tb) => tb.key === key);
+  if (i < 0) return;
+  const tb = openTabs[i];
+  openTabs.splice(i, 1);
+  if (tb.kind === "terminal") {
+    const s = termSessions.get(tb.wsId);
+    if (s) {
+      invoke("term_kill", { id: s.id });
+      s.term.dispose();
+      termSessions.delete(tb.wsId);
+    }
+  }
+  if (view.kind === tb.kind && (view as { id?: string }).id === tb.wsId) {
+    view = openTabs.length ? tabToView(openTabs[Math.min(i, openTabs.length - 1)]) : fallbackView();
+  }
+  render();
+}
+
 // ---------- embedded terminal (PROTOTYPE — experiment branch) ----------
 interface TermSession { term: Terminal; fit: FitAddon; el: HTMLElement; id: number; }
 const termSessions = new Map<string, TermSession>(); // workspaceId -> session
@@ -925,12 +995,27 @@ async function openTerminal(ws: Workspace) {
   if (!sess) {
     const id = nextTermId++;
     const cs = getComputedStyle(document.documentElement);
+    const cssVar = (n: string) => cs.getPropertyValue(n).trim() || undefined;
     const term = new Terminal({
-      fontFamily: cs.getPropertyValue("--mono").trim() || "monospace",
+      fontFamily: cssVar("--mono") ?? "monospace",
       fontSize: settings.fontSize ?? 13,
+      fontWeight: (settings.fontWeight ?? 400) as 400,
+      fontWeightBold: 700,
+      lineHeight: 1.18,
       theme: {
-        background: cs.getPropertyValue("--bg").trim() || undefined,
-        foreground: cs.getPropertyValue("--text").trim() || undefined,
+        background: cssVar("--bg"),
+        foreground: cssVar("--text"),
+        cursor: cssVar("--text"),
+        cursorAccent: cssVar("--bg"),
+        selectionBackground: cssVar("--bg-active"),
+        red: cssVar("--danger"),
+        green: cssVar("--green"),
+        blue: cssVar("--accent"),
+        yellow: "#d29922",
+        magenta: "#8b5cf6",
+        cyan: "#39c5cf",
+        brightBlack: cssVar("--text-faint"),
+        brightWhite: "#ffffff",
       },
     });
     const fit = new FitAddon();
@@ -941,16 +1026,19 @@ async function openTerminal(ws: Workspace) {
     termSessions.set(ws.id, sess);
     term.onData((d) => invoke("term_write", { id, data: d }));
     term.onResize(({ cols, rows }) => invoke("term_resize", { id, cols, rows }));
+    // reflow on window/pane resize (only while attached)
+    new ResizeObserver(() => {
+      if (sess!.el.isConnected) sess!.fit.fit();
+    }).observe(el);
     await listen<string>(`term-data-${id}`, (e) => term.write(e.payload));
     await listen(`term-exit-${id}`, () => {
       term.write("\r\n\x1b[90m[process exited]\x1b[0m\r\n");
       termSessions.delete(ws.id); // next launch spawns a fresh session
     });
   }
+  ensureTab("terminal", ws.id);
   view = { kind: "terminal", id: ws.id };
-  render();
-  const host = $("termHost");
-  if (sess.el.parentElement !== host) host.appendChild(sess.el);
+  render(); // renderMain attaches the terminal DOM
   if (!sess.term.element) sess.term.open(sess.el);
   sess.fit.fit();
   sess.term.focus();
@@ -983,10 +1071,18 @@ async function deleteWs(ws: Workspace) {
   const ok = await modal({ title: ws.name, body: t("confirmDelete"), okLabel: t("delete"), danger: true });
   if (ok === null) return;
   await invoke("delete_workspace", { id: ws.id });
+  // close its tabs and kill any live terminal
+  openTabs = openTabs.filter((tb) => tb.wsId !== ws.id);
+  const s = termSessions.get(ws.id);
+  if (s) {
+    await invoke("term_kill", { id: s.id });
+    s.term.dispose();
+    termSessions.delete(ws.id);
+  }
   setStatus(t("deleted"));
   await reload();
-  if (view.kind === "workspace" && view.id === ws.id) {
-    view = workspaces.length ? { kind: "workspace", id: workspaces[0].id } : { kind: "settings" };
+  if ((view.kind === "workspace" || view.kind === "terminal") && (view as { id: string }).id === ws.id) {
+    view = fallbackView();
   }
   render();
 }
@@ -1378,6 +1474,11 @@ document.addEventListener("keydown", async (e) => {
   wireFileDrop();
   wireSplitter();
   getVersion().then((v) => (appVersion = v));
-  view = workspaces.length ? { kind: "workspace", id: workspaces[0].id } : { kind: "settings" };
+  if (workspaces.length) {
+    ensureTab("workspace", workspaces[0].id);
+    view = { kind: "workspace", id: workspaces[0].id };
+  } else {
+    view = { kind: "settings" };
+  }
   render();
 })();

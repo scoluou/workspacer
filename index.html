@@ -133,16 +133,29 @@
       margin-left: -3px; z-index: 5; position: relative;
     }
     .splitter:hover, .splitter.dragging { background: var(--accent-dim, rgba(79,140,255,0.25)); }
-    .main { flex: 1; overflow-y: auto; padding: 24px 28px 60px; }
-    .main-flush { padding: 0; overflow: hidden; }
+    .main { flex: 1; display: flex; flex-direction: column; overflow: hidden; padding: 0; }
+    .content-wrap { flex: 1; overflow-y: auto; padding: 24px 28px 60px; }
+    .content-flush { padding: 0; overflow: hidden; }
+    /* tab bar (VS Code style) */
+    .tabbar { display: flex; background: var(--bg-sidebar); border-bottom: 1px solid var(--border-subtle); overflow-x: auto; flex: 0 0 auto; }
+    .tab {
+      display: flex; align-items: center; gap: 8px; padding: 7px 8px 7px 14px;
+      font-size: 0.92rem; color: var(--text-dim); cursor: pointer; user-select: none;
+      border-right: 1px solid var(--border-subtle); white-space: nowrap;
+    }
+    .tab:hover { color: var(--text); }
+    .tab.active { background: var(--bg); color: var(--text); box-shadow: inset 0 2px 0 var(--accent); }
+    .tab-close { color: var(--text-faint); border-radius: 4px; padding: 0 4px; }
+    .tab-close:hover { color: #fff; background: var(--danger); }
     /* embedded terminal (prototype) */
     .term-wrap { display: flex; flex-direction: column; height: 100%; }
-    .term-bar { display: flex; align-items: center; gap: 8px; padding: 6px 10px; border-bottom: 1px solid var(--border-subtle); }
-    .term-title { font-size: 0.95rem; color: var(--text-dim); }
-    .term-bar .spacer { flex: 1; }
-    .term-host { flex: 1; overflow: hidden; padding: 4px 0 4px 8px; }
+    .term-host { flex: 1; overflow: hidden; padding: 8px; background: var(--bg); }
     .term-el { height: 100%; }
     .term-el .terminal { height: 100%; }
+    .term-el .xterm-viewport::-webkit-scrollbar { width: 8px; }
+    .term-el .xterm-viewport::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+    .term-el .xterm-viewport::-webkit-scrollbar-thumb:hover { background: var(--text-faint); }
+    .term-el .xterm-viewport::-webkit-scrollbar-track { background: transparent; }
     .main-head { margin-bottom: 20px; }
     .main-head h1 { font-size: 1.54rem; font-weight: 600; margin: 0 0 4px; letter-spacing: -0.01em; }
     .main-head p { margin: 0; color: var(--text-dim); font-size: 1rem; }
