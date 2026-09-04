@@ -12,6 +12,7 @@ interface Workspace {
   id: string; name: string; description: string;
   agent: string | null; projects: Project[];
   files: Project[];
+  links: Project[];
 }
 interface AgentInfo { key: string; label: string; }
 interface Settings {
@@ -49,6 +50,10 @@ const DICT: Record<string, Record<string, string>> = {
     addFolder: "+ 添加目录",
     addProject: "新增项目",
     addFile: "添加文件",
+    addLink: "添加链接",
+    links: "链接",
+    removeLink: "移除链接",
+    confirmRemoveLink: "从 workspace 移除该链接？",
     otherFiles: "其他文件",
     removeFile: "移除文件",
     confirmRemoveFile: "从 workspace 移除该文件？（不删除磁盘文件）",
@@ -174,6 +179,10 @@ const DICT: Record<string, Record<string, string>> = {
     addFolder: "+ Add folder",
     addProject: "Add project",
     addFile: "Add file",
+    addLink: "Add link",
+    links: "Links",
+    removeLink: "Remove link",
+    confirmRemoveLink: "Remove this link from the workspace?",
     otherFiles: "Other files",
     removeFile: "Remove file",
     confirmRemoveFile: "Remove this file from the workspace? (the file on disk is not deleted)",
@@ -971,6 +980,15 @@ function workspaceDetailHtml(ws: Workspace): string {
         <span class="d editable ${f.description ? "" : "empty-val"}" data-file-desc="${i}" data-placeholder="${esc(t("addDescription"))}" title="${esc(t("clickToEdit"))}">${f.description ? esc(f.description) : ""}</span>
       </div>`;
   };
+  const linkRow = (i: number) => {
+    const l = ws.links[i];
+    return `
+      <div class="proj-item link-item">
+        <span class="ico">🔗</span>
+        <span class="p link-path" data-link-open="${i}" title="${esc(t("open"))}: ${esc(l.path)}">${esc(l.path)}</span>
+        <span class="d editable ${l.description ? "" : "empty-val"}" data-link-desc="${i}" data-placeholder="${esc(t("addDescription"))}" title="${esc(t("clickToEdit"))}">${l.description ? esc(l.description) : ""}</span>
+      </div>`;
+  };
   const projectsHtml = ws.projects.length
     ? ws.projects
         .map((p, i) => `
@@ -985,6 +1003,10 @@ function workspaceDetailHtml(ws: Workspace): string {
     ? `<div class="field collapsible" data-collapse="files" style="margin:14px 0 10px;"><label>${collapsedSections.has(`${ws.id}:files`) ? "▸" : "▾"} ${esc(t("otherFiles"))}（${external.length}）</label></div>
       <div class="file-list" ${collapsedSections.has(`${ws.id}:files`) ? 'style="display:none;"' : ""}>${external.map(fileRow).join("")}</div>`
     : "";
+  const linksHtml = ws.links.length
+    ? `<div class="field collapsible" data-collapse="links" style="margin:14px 0 10px;"><label>${collapsedSections.has(`${ws.id}:links`) ? "▸" : "▾"} ${esc(t("links"))}（${ws.links.length}）</label></div>
+      <div class="file-list" ${collapsedSections.has(`${ws.id}:links`) ? 'style="display:none;"' : ""}>${ws.links.map((_, i) => linkRow(i)).join("")}</div>`
+    : "";
   return `
     <div class="main-head">
       <div class="ws-detail-head">
@@ -997,6 +1019,7 @@ function workspaceDetailHtml(ws: Workspace): string {
       <div class="field collapsible" data-collapse="projects" style="margin-bottom:10px;"><label>${collapsedSections.has(`${ws.id}:projects`) ? "▸" : "▾"} ${esc(t("projectCount"))}（${ws.projects.length}）</label></div>
       <div class="proj-list" ${collapsedSections.has(`${ws.id}:projects`) ? 'style="display:none;"' : ""}>${projectsHtml}</div>
       ${externalHtml}
+      ${linksHtml}
       <div class="launch-bar">
         <label style="color:var(--text-dim);font-size:0.92rem;">${esc(t("agent"))}</label>
         <select id="wsAgentSel">${agentOptions(ws.agent, agentLabel(settings.defaultAgent) || t("notSet"))}</select>
@@ -1310,6 +1333,17 @@ async function removeFile(ws: Workspace, index: number) {
   render();
 }
 
+async function removeLink(ws: Workspace, index: number) {
+  const l = ws.links[index];
+  const ok = await modal({ title: l.path, body: t("confirmRemoveLink"), okLabel: t("removeLink"), danger: true });
+  if (ok === null) return;
+  const links = ws.links.filter((_, j) => j !== index);
+  await invoke("update_workspace", { ws: { ...ws, links } });
+  setStatus(t("removed"));
+  await reload();
+  render();
+}
+
 // ---------- modal ----------
 // In-app dialog for confirms/prompts. Native window.alert/confirm/prompt are
 // banned: they ignore the CSS-variable theme. Resolves with the (trimmed)
@@ -1463,6 +1497,39 @@ function wireWorkspaceDetail(ws: Workspace) {
     wireFileRows(Array.from(groupEl.querySelectorAll(".file-item")), groups[gi]);
   });
   wireFileRows(Array.from(document.querySelectorAll<HTMLElement>(".file-list .file-item")), external);
+  // link rows: click path to open, desc edit, right-click, drag-reorder + trash
+  document.querySelectorAll("[data-link-desc]").forEach((el) => {
+    const i = Number((el as HTMLElement).dataset.linkDesc);
+    const trigger = makeEditable(el as HTMLElement, ws.links[i].description, async (val) => {
+      const links = ws.links.map((l, j) => (j === i ? { ...l, description: val } : l));
+      await invoke("update_workspace", { ws: { ...ws, links } });
+      setStatus(t("saved"));
+    });
+    const row = el.closest(".link-item") as HTMLElement;
+    row?.addEventListener("contextmenu", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      showCtxMenu(e.clientX, e.clientY, [
+        { label: t("open"), onClick: () => invoke("open_url", { url: ws.links[i].path }) },
+        { label: t("editDescription"), onClick: () => trigger() },
+        { label: t("removeLink"), onClick: () => removeLink(ws, i) },
+      ]);
+    });
+  });
+  document.querySelectorAll("[data-link-open]").forEach((el) =>
+    el.addEventListener("click", () => {
+      if (Date.now() < suppressClickUntil) return; // trailing click after a drag
+      invoke("open_url", { url: ws.links[Number((el as HTMLElement).dataset.linkOpen)].path });
+    })
+  );
+  wireDragReorder(Array.from(document.querySelectorAll<HTMLElement>(".link-item")), async (from, to) => {
+    const links = [...ws.links];
+    links.splice(to, 0, ...links.splice(from, 1));
+    await invoke("update_workspace", { ws: { ...ws, links } });
+    setStatus(t("saved"));
+    await reload();
+    render();
+  }, (i) => removeLink(ws, i));
 
   // right-click empty space in the project card: add project
   const card = document.querySelector(".main .card") as HTMLElement | null;
@@ -1486,6 +1553,18 @@ function wireWorkspaceDetail(ws: Workspace) {
           const picked = await open({ multiple: true });
           const paths = picked ? (Array.isArray(picked) ? picked : [picked]) : [];
           if (paths.length) await addPathsToWs(ws, [], paths);
+        },
+      },
+      {
+        label: t("addLink"),
+        onClick: async () => {
+          const val = await modal({ title: t("addLink"), input: "", okLabel: t("addLink") });
+          if (val === null || !val) return;
+          const url = val.includes("://") ? val : `https://${val}`;
+          await invoke("update_workspace", { ws: { ...ws, links: [...ws.links, { path: url, description: "" }] } });
+          setStatus(t("saved"));
+          await reload();
+          render();
         },
       },
     ]);

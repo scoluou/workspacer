@@ -58,6 +58,9 @@ struct Workspace {
     /// attached files (any path, in or outside projects); context-only
     #[serde(default)]
     files: Vec<Project>,
+    /// attached links (url + description); context-only
+    #[serde(default)]
+    links: Vec<Project>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Default)]
@@ -148,21 +151,22 @@ fn context_parts(ws: &Workspace) -> Vec<String> {
             .collect();
         parts.push(format!("Projects in this workspace: {}", items.join("; ")));
     }
-    // attached files are always listed (attaching is the statement of
-    // relevance); description in parens when present
-    if !ws.files.is_empty() {
-        let items: Vec<String> = ws
-            .files
+    // uniform rule for files and links: no description → not injected
+    let described_files: Vec<&Project> = ws.files.iter().filter(|f| !f.description.trim().is_empty()).collect();
+    if !described_files.is_empty() {
+        let items: Vec<String> = described_files
             .iter()
-            .map(|f| {
-                if f.description.trim().is_empty() {
-                    f.path.clone()
-                } else {
-                    format!("{} ({})", f.path, f.description.trim())
-                }
-            })
+            .map(|f| format!("{} ({})", f.path, f.description.trim()))
             .collect();
         parts.push(format!("Workspace files: {}", items.join("; ")));
+    }
+    let described_links: Vec<&Project> = ws.links.iter().filter(|l| !l.description.trim().is_empty()).collect();
+    if !described_links.is_empty() {
+        let items: Vec<String> = described_links
+            .iter()
+            .map(|l| format!("{} ({})", l.path, l.description.trim()))
+            .collect();
+        parts.push(format!("Workspace links: {}", items.join("; ")));
     }
     parts
 }
@@ -187,7 +191,8 @@ fn read_inlineable_file(path: &str) -> Option<String> {
 /// inlined contents of small text files.
 fn build_context_doc(ws: &Workspace) -> String {
     let mut doc = context_parts(ws).join("\n");
-    for f in &ws.files {
+    // only described files are injected (uniform rule), so only they get inlined
+    for f in ws.files.iter().filter(|f| !f.description.trim().is_empty()) {
         if let Some(content) = read_inlineable_file(&f.path) {
             doc.push_str(&format!("\n\n--- {}", f.path));
             if !f.description.trim().is_empty() {
@@ -221,12 +226,12 @@ fn build_agent(agent: &str, ws: &Workspace) -> Result<(String, String, String), 
     // file contents inlined). Delivery: claude has --append-system-prompt-file,
     // pi auto-reads an existing path passed to --append-system-prompt, the
     // initial-prompt agents get a pointer prompt.
-    let doc = if ws.files.is_empty() {
-        None
-    } else {
+    let doc = if ws.files.iter().any(|f| !f.description.trim().is_empty()) {
         let path = std::env::temp_dir().join(format!("workspacer-ctx-{}.md", ws.id));
         fs::write(&path, build_context_doc(ws)).map_err(|e| e.to_string())?;
         Some(path)
+    } else {
+        None
     };
     let pointer = doc.as_ref().map(|d| {
         format!(
@@ -449,6 +454,7 @@ fn create_workspace(state: tauri::State<Mutex<UndoStacks>>, name: String, descri
         agent,
         projects,
         files: vec![],
+        links: vec![],
     };
     list.push(ws.clone());
     save("workspaces.json", &list)?;
@@ -483,6 +489,17 @@ fn classify_paths(paths: Vec<String>) -> (Vec<String>, Vec<String>) {
         .into_iter()
         .filter(|p| PathBuf::from(p).exists())
         .partition(|p| PathBuf::from(p).is_dir())
+}
+
+/// Open a URL in the default browser. rundll32 takes it as a plain argv entry,
+/// so no shell parsing is involved (& in URLs is safe).
+#[tauri::command]
+fn open_url(url: String) -> Result<(), String> {
+    Command::new("rundll32")
+        .args(["url.dll,FileProtocolHandler", &url])
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -764,6 +781,7 @@ fn main() {
             undo_workspaces,
             redo_workspaces,
             classify_paths,
+            open_url,
             open_data_dir,
             export_workspaces,
             import_workspaces,
@@ -793,6 +811,7 @@ mod tests {
             agent: None,
             projects: vec![],
             files: vec![],
+            links: vec![],
         }
     }
 
@@ -846,8 +865,8 @@ mod tests {
         let mut w = ws("n", "d");
         w.files = vec![
             Project { path: small.to_string_lossy().into(), description: "s".into() },
-            Project { path: big.to_string_lossy().into(), description: "".into() },
-            Project { path: bin.to_string_lossy().into(), description: "".into() },
+            Project { path: big.to_string_lossy().into(), description: "b".into() },
+            Project { path: bin.to_string_lossy().into(), description: "x".into() },
         ];
         let doc = build_context_doc(&w);
         assert!(doc.contains("hello 内容"), "small file inlined");
@@ -894,12 +913,19 @@ mod tests {
                 Project { path: "E:/spec.md".into(), description: "doc".into() },
                 Project { path: "E:/notes.txt".into(), description: "".into() },
             ],
+            links: vec![
+                Project { path: "https://example.com".into(), description: "docs".into() },
+                Project { path: "https://nodesc.com".into(), description: "".into() },
+            ],
         };
         let c = build_context(&w);
         assert!(!c.contains('\n'), "single line: {c}");
         assert!(!c.contains(":;"), "no header/item seam: {c}");
         assert!(c.contains("Projects in this workspace: E:/a (da)"), "format: {c}");
-        // files are always listed, description in parens only when present
-        assert!(c.contains("Workspace files: E:/spec.md (doc); E:/notes.txt"), "files: {c}");
+        // uniform rule: no description → not injected
+        assert!(c.contains("Workspace files: E:/spec.md (doc)"), "files: {c}");
+        assert!(!c.contains("notes.txt"), "undescribed file skipped: {c}");
+        assert!(c.contains("Workspace links: https://example.com (docs)"), "links: {c}");
+        assert!(!c.contains("nodesc.com"), "undescribed link skipped: {c}");
     }
 }
