@@ -1968,12 +1968,13 @@ function wireFileDrop() {
   const win = getCurrentWebviewWindow();
   let scale = 1;
   win.scaleFactor().then((s) => (scale = s));
-  const setHint = (zone: "project" | "workspace" | null) => {
+  const setHint = (zone: "project" | "workspace" | "terminal" | null) => {
     document.querySelector(".sidebar")?.classList.toggle("drop-hint", zone === "workspace");
     document.querySelector(".main")?.classList.toggle("drop-hint", zone === "project");
   };
-  const zoneAt = (x: number, y: number): "project" | "workspace" => {
+  const zoneAt = (x: number, y: number): "project" | "workspace" | "terminal" => {
     const el = document.elementFromPoint(x, y) as HTMLElement | null;
+    if (el?.closest(".term-wrap")) return "terminal";
     return view.kind === "workspace" && el?.closest(".main") ? "project" : "workspace";
   };
   win.onDragDropEvent(async (event) => {
@@ -1982,6 +1983,16 @@ function wireFileDrop() {
     const x = p.position.x / scale, y = p.position.y / scale;
     if (p.type === "enter" || p.type === "over") return setHint(zoneAt(x, y));
     setHint(null);
+    // terminal drop: type the paths into the PTY (quote paths with spaces), no Enter
+    if (zoneAt(x, y) === "terminal" && view.kind === "terminal") {
+      const sess = termSessions.get(Number((view as { id: string }).id));
+      if (sess?.spawned) {
+        const text = p.paths.map((s) => (/\s/.test(s) ? `"${s}"` : s)).join(" ");
+        invoke("term_write", { id: sess.id, data: text });
+        sess.term.focus();
+      }
+      return;
+    }
     const [dirs, files] = await invoke<[string[], string[]]>("classify_paths", { paths: p.paths });
     if (!dirs.length && !files.length) return setStatus(t("dropNoDirs"), true);
     if (zoneAt(x, y) === "project" && view.kind === "workspace") {
