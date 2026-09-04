@@ -170,6 +170,7 @@ const DICT: Record<string, Record<string, string>> = {
     noAgents: "没有运行中的 agent",
     statusRunning: "运行中",
     statusExited: "已退出",
+    projectTab: "项目",
     statusPending: "待恢复",
     convTitle: "对话记录",
     convEmpty: "还没有对话",
@@ -307,6 +308,7 @@ const DICT: Record<string, Record<string, string>> = {
     statusRunning: "Running",
     statusExited: "Exited",
     statusPending: "Pending",
+    projectTab: "Project",
     convTitle: "Conversation",
     convEmpty: "No messages yet",
   },
@@ -520,13 +522,7 @@ function renderNav() {
     });
     item.addEventListener("click", () => {
       if (Date.now() < suppressClickUntil) return; // just finished dragging, not a navigation click
-      ensureTab(ws.id);
-      // with agent tabs around, jump to the most recently used one; the
-      // workspace tab itself stays on the project page
-      const order = orderOf(ws.id);
-      const last = lastTermByWs.get(ws.id) ?? (order.length ? order[order.length - 1] : undefined);
-      view = last !== undefined && termSessions.has(last) ? { kind: "terminal", id: String(last) } : { kind: "workspace", id: ws.id };
-      render();
+      openWorkspace(ws.id); // last-used agent tab if any, else the project page
     });
     item.addEventListener("contextmenu", (e) => {
       e.preventDefault();
@@ -599,12 +595,14 @@ function tabbarHtml(): string {
     .join("");
   return `<div class="tabbar">${tabs}<div class="tab tab-agents${view.kind === "agents" ? " active" : ""}" data-tab="agents"><span class="tab-label">⚡ ${esc(t("agentsTab"))}${running ? ` (${running})` : ""}</span></div></div>`;
 }
+// sub-tab bar: the active workspace's project page + terminal sessions
 function subTabbarHtml(wsId: string): string {
   const ids = orderOf(wsId);
-  if (!ids.length) return "";
   const activeId = view.kind === "terminal" ? Number((view as { id: string }).id) : null;
+  const projActive = view.kind === "workspace" && (view as { id: string }).id === wsId;
   const seen = new Map<string, number>();
-  return `<div class="tabbar subtabbar">${ids
+  const projTab = `<div class="tab subtab-proj${projActive ? " active" : ""}" data-subproj="${wsId}"><span class="tab-label">📁 ${esc(t("projectTab"))}</span></div>`;
+  const terms = ids
     .map((tid) => {
       const s = termSessions.get(tid);
       if (!s) return "";
@@ -616,11 +614,17 @@ function subTabbarHtml(wsId: string): string {
         : `<span class="tab-close" data-subclose="${tid}" title="${esc(t("closeTab"))}">✕</span>`;
       return `<div class="tab${tid === activeId ? " active" : ""}${s.exited ? " exited" : ""}" data-subtab="${tid}"><span class="tab-label">${label}</span>${tail}</div>`;
     })
-    .join("")}</div>`;
+    .join("");
+  return `<div class="tabbar subtabbar">${projTab}${terms}</div>`;
 }
 
 function wireSubTabbar(wsId: string) {
-  const els = Array.from(document.querySelectorAll<HTMLElement>(".subtabbar .tab"));
+  const projEl = document.querySelector<HTMLElement>("[data-subproj]");
+  projEl?.addEventListener("click", () => {
+    view = { kind: "workspace", id: wsId };
+    render();
+  });
+  const els = Array.from(document.querySelectorAll<HTMLElement>(".subtabbar .tab[data-subtab]"));
   wireDragReorder(els, async (from, to) => {
     const order = orderOf(wsId);
     order.splice(to, 0, ...order.splice(from, 1));
@@ -665,6 +669,14 @@ function wireSubTabbar(wsId: string) {
   );
 }
 
+// open a workspace: its most recently used agent tab if any, else the project page
+function openWorkspace(wsId: string) {
+  ensureTab(wsId);
+  const order = orderOf(wsId);
+  const last = lastTermByWs.get(wsId) ?? (order.length ? order[order.length - 1] : undefined);
+  view = last !== undefined && termSessions.has(last) ? { kind: "terminal", id: String(last) } : { kind: "workspace", id: wsId };
+  render();
+}
 function wireTabbar() {
   const tabEls = Array.from(document.querySelectorAll<HTMLElement>(".tab[data-tab]"));
   // workspace tabs are drag-reorderable; the agents tab is fixed at the end
@@ -686,7 +698,7 @@ function wireTabbar() {
           view = { kind: "agents" };
         }
       } else {
-        view = { kind: "workspace", id: key.slice(3) };
+        openWorkspace(key.slice(3)); // same as sidebar: last-used agent if any
       }
       render();
     });
