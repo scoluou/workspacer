@@ -149,6 +149,9 @@
     .tab-close:hover { color: #fff; background: var(--danger); }
     .tab-pin:hover { background: var(--bg-hover); }
     .tab.pinned { color: var(--text); }
+    .tab.dragging { background: var(--accent-dim); }
+    .tab.drag-over { box-shadow: inset 2px 0 0 var(--accent); }
+    .tab.drag-over-end { box-shadow: inset -2px 0 0 var(--accent); }
     /* embedded terminal (prototype) */
     .term-wrap { display: flex; flex-direction: column; height: 100%; }
     .term-host { flex: 1; overflow: hidden; padding: 8px; background: var(--bg); }

@@ -374,7 +374,7 @@ let suppressClickUntil = 0;
 // covers touch). Mouse: press and move >4px. Touch: long-press 350ms first, so
 // vertical scrolling still works. onMove(from, to) gets sibling indices and
 // must persist + re-render.
-function wireDragReorder(els: HTMLElement[], onMove: (from: number, to: number) => Promise<void>, onDelete?: (index: number) => Promise<void>) {
+function wireDragReorder(els: HTMLElement[], onMove: (from: number, to: number) => Promise<void>, onDelete?: (index: number) => Promise<void>, axis: "y" | "x" = "y") {
   const trash = () => document.getElementById("trashDrop");
   const overTrash = (x: number, y: number) => {
     const t = trash();
@@ -386,14 +386,16 @@ function wireDragReorder(els: HTMLElement[], onMove: (from: number, to: number) 
   // above y. Gap-immune (row margins never produce dead zones): top half of a
   // row targets its top edge, bottom half the edge below it; above the first
   // row → 0, below the last → els.length.
-  const insertAt = (y: number) => {
+  const insertAt = (pos: number) => {
     let k = 0;
     for (let j = 0; j < els.length; j++) {
       const r = els[j].getBoundingClientRect();
-      if (y > (r.top + r.bottom) / 2) k = j + 1;
+      const mid = axis === "y" ? (r.top + r.bottom) / 2 : (r.left + r.right) / 2;
+      if (pos > mid) k = j + 1;
     }
     return k;
   };
+  const axisPos = (ev: PointerEvent) => (axis === "y" ? ev.clientY : ev.clientX);
   els.forEach((el, i) => {
     el.addEventListener("pointerdown", (e) => {
       if (e.button !== 0) return;
@@ -420,7 +422,7 @@ function wireDragReorder(els: HTMLElement[], onMove: (from: number, to: number) 
         // position (visual feedback; the actual save below still skips no-ops)
         const onTrash = overTrash(ev.clientX, ev.clientY);
         trash()?.classList.toggle("drag-over", onTrash);
-        const at = insertAt(ev.clientY);
+        const at = insertAt(axisPos(ev));
         els.forEach((x, j) => {
           x.classList.toggle("drag-over", !onTrash && at === j);
           x.classList.toggle("drag-over-end", !onTrash && at === els.length && j === els.length - 1);
@@ -437,7 +439,7 @@ function wireDragReorder(els: HTMLElement[], onMove: (from: number, to: number) 
           await onDelete!(i);
           return;
         }
-        const at = insertAt(ev.clientY);
+        const at = insertAt(axisPos(ev));
         if (at === i || at === i + 1) return; // own top/bottom edge: no move
         // removal shifts later indices down by one
         await onMove(i, at > i ? at - 1 : at);
@@ -563,9 +565,16 @@ function tabbarHtml(): string {
 }
 
 function wireTabbar() {
-  document.querySelectorAll<HTMLElement>(".tab").forEach((el) => {
+  const tabEls = Array.from(document.querySelectorAll<HTMLElement>(".tab"));
+  // tabs are drag-reorderable (horizontal)
+  wireDragReorder(tabEls, async (from, to) => {
+    openTabs.splice(to, 0, ...openTabs.splice(from, 1));
+    render();
+  }, undefined, "x");
+  tabEls.forEach((el) => {
     const key = el.dataset.tab!;
     el.addEventListener("click", (e) => {
+      if (Date.now() < suppressClickUntil) return; // trailing click after a drag
       if ((e.target as HTMLElement).closest(".tab-close, .tab-pin")) return;
       const tb = openTabs.find((x) => x.key === key);
       if (tb) {
@@ -583,13 +592,21 @@ function wireTabbar() {
       if (!tb) return;
       const closable = tb.kind === "terminal" && !tb.pinned;
       showCtxMenu(e.clientX, e.clientY, [
-        {
-          label: t(tb.pinned ? "unpin" : "pin"),
-          onClick: () => {
-            tb.pinned = !tb.pinned;
-            render();
-          },
-        },
+        // pin is for terminal tabs; workspace tabs are permanent anyway
+        ...(tb.kind === "terminal"
+          ? [{
+              label: t(tb.pinned ? "unpin" : "pin"),
+              onClick: () => {
+                if (tb.pinned) {
+                  tb.pinned = false; // unpin: stays in place
+                  render();
+                } else {
+                  pinTab(key); // pin: moves to the front group
+                  render();
+                }
+              },
+            }]
+          : []),
         ...(closable ? [{ label: t("closeThis"), onClick: () => closeTab(key) }] : []),
         { label: t("closeOthers"), onClick: () => closeOtherTabs(key) },
         { label: t("closeAll"), onClick: () => closeAllTabs() },
@@ -1083,6 +1100,17 @@ function closeTab(key: string) {
   const tb = openTabs.find((x) => x.key === key);
   if (!tb || tb.kind === "workspace" || tb.pinned) return; // workspace tabs and pinned tabs are unclosable
   closeTabs([key]);
+}
+// pinned tabs sort to the front (after workspace tabs and already-pinned ones)
+function pinTab(key: string) {
+  const i = openTabs.findIndex((tb) => tb.key === key);
+  if (i < 0) return;
+  const tb = openTabs[i];
+  tb.pinned = true;
+  openTabs.splice(i, 1);
+  let pos = 0;
+  while (pos < openTabs.length && (openTabs[pos].kind === "workspace" || openTabs[pos].pinned)) pos++;
+  openTabs.splice(pos, 0, tb);
 }
 function closeOtherTabs(keepKey: string) {
   closeTabs(openTabs.filter((tb) => tb.kind === "terminal" && !tb.pinned && tb.key !== keepKey).map((tb) => tb.key));
