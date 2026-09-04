@@ -6,6 +6,7 @@ import { listen } from "@tauri-apps/api/event";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
+import { attachImeHeuristic } from "./ime-anchor";
 
 interface Project { path: string; description: string; }
 interface Workspace {
@@ -1271,6 +1272,7 @@ function killTerm(termId: number) {
   const s = termSessions.get(termId);
   if (s) {
     invoke("term_kill", { id: s.id });
+    s.imeDetach?.();
     s.term.dispose();
     termSessions.delete(termId);
   }
@@ -1355,6 +1357,7 @@ interface TermSession {
   exited: boolean; pinned: boolean; spawned: boolean;
   entries: { text: string; line: number; time: number }[]; // submitted prompts
   inputBuf: string; // line currently being typed (conversation capture)
+  imeDetach?: () => void;
 }
 const termSessions = new Map<number, TermSession>(); // termId -> session
 let nextTermId = 1;
@@ -1486,6 +1489,9 @@ async function startTerminal(sess: TermSession) {
   if (sess.spawned) return;
   sess.spawned = true;
   sess.term.open(sess.el);
+  // pin the IME candidate window to the TUI's visual caret (inverse-video
+  // cell), not the hardware cursor parked at the end of output
+  sess.imeDetach = attachImeHeuristic(sess.term).detach;
   sess.fit.fit();
   sess.term.focus();
   setStatus(t("launching"));
