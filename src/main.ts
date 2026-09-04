@@ -575,6 +575,11 @@ function renderNav() {
 $("tbMin").addEventListener("click", () => getCurrentWebviewWindow().minimize());
 $("tbMax").addEventListener("click", () => getCurrentWebviewWindow().toggleMaximize());
 $("tbClose").addEventListener("click", () => getCurrentWebviewWindow().close()); // our close handler applies the close-action setting
+// swap the maximize icon for a restore icon while maximized
+const appWin = getCurrentWebviewWindow();
+const syncMaxIcon = async () => { $("tbMax").textContent = (await appWin.isMaximized()) ? "❐" : "▢"; };
+appWin.onResized(() => syncMaxIcon());
+syncMaxIcon();
 // logo/title returns home: first workspace, or settings when there are none
 document.querySelector(".sidebar-head")!.addEventListener("click", () => {
   if (workspaces.length) {
