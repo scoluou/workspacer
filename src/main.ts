@@ -170,6 +170,8 @@ const DICT: Record<string, Record<string, string>> = {
     statusRunning: "运行中",
     statusExited: "已退出",
     statusPending: "待恢复",
+    convTitle: "对话记录",
+    convEmpty: "还没有对话",
   },
   en: {
     workspaces: "Work Spaces",
@@ -304,6 +306,8 @@ const DICT: Record<string, Record<string, string>> = {
     statusRunning: "Running",
     statusExited: "Exited",
     statusPending: "Pending",
+    convTitle: "Conversation",
+    convEmpty: "No messages yet",
   },
 };
 
@@ -702,7 +706,7 @@ function wireTabbar() {
   );
 }
 function terminalHtml(): string {
-  return `<div class="term-wrap"><div class="term-host" id="termHost"></div></div>`;
+  return `<div class="term-wrap"><div class="term-host" id="termHost"></div><div class="conv-bar" id="convBar"></div></div>`;
 }
 
 // aggregate view: every live/exited terminal session across workspaces
@@ -747,11 +751,45 @@ function wireTerminal(termId: number) {
   if (!sess) return;
   const host = $("termHost");
   if (sess.el.parentElement !== host) host.appendChild(sess.el);
+  renderConvBar(sess);
   if (sess.spawned) {
     sess.fit.fit();
   } else {
     startTerminal(sess); // first activation: open xterm + spawn/resume the PTY
   }
+}
+
+// conversation bar: every prompt the user submitted in this terminal; click
+// scrolls the buffer to it (recorded line, with a text-search fallback since
+// TUI redraws shift lines)
+function renderConvBar(sess: TermSession) {
+  const bar = $("convBar");
+  if (!bar) return;
+  bar.innerHTML = `<div class="conv-head">${esc(t("convTitle"))}</div>` +
+    (sess.entries.length
+      ? sess.entries.map((en, i) => `<div class="conv-item" data-conv="${i}" title="${esc(en.text)}"><span class="t">${new Date(en.time).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span> ${esc(en.text)}</div>`).join("")
+      : `<div class="conv-empty">${esc(t("convEmpty"))}</div>`);
+  bar.querySelectorAll<HTMLElement>("[data-conv]").forEach((el) =>
+    el.addEventListener("click", () => {
+      const entry = sess.entries[Number(el.dataset.conv)];
+      const buf = sess.term.buffer.active;
+      let target = Math.min(entry.line, buf.length - 1);
+      const there = buf.getLine(target)?.translateToString().trim() ?? "";
+      if (!there.includes(entry.text.slice(0, 20))) {
+        target = -1;
+        for (let i = buf.length - 1; i >= 0; i--) {
+          const l = buf.getLine(i)?.translateToString().trim() ?? "";
+          if (l.includes(entry.text.slice(0, 24))) {
+            target = i;
+            break;
+          }
+        }
+      }
+      if (target >= 0) sess.term.scrollToLine(target);
+      else sess.term.scrollToBottom();
+    })
+  );
+  bar.scrollTop = bar.scrollHeight; // latest at the bottom, scrolled into view
 }
 function renderMain() {
   const main = $("main");
@@ -1306,6 +1344,8 @@ interface TermSession {
   term: Terminal; fit: FitAddon; el: HTMLElement; id: number; wsId: string;
   agentKey: string; sessionId: string; resume: boolean;
   exited: boolean; pinned: boolean; spawned: boolean;
+  entries: { text: string; line: number; time: number }[]; // submitted prompts
+  inputBuf: string; // line currently being typed (conversation capture)
 }
 const termSessions = new Map<number, TermSession>(); // termId -> session
 let nextTermId = 1;
@@ -1350,6 +1390,8 @@ async function openTerminal(ws: Workspace, opts: { activate?: boolean; sessionId
     exited: false,
     pinned: opts.pinned ?? false,
     spawned: false,
+    entries: [],
+    inputBuf: "",
   };
   termSessions.set(id, sess);
   // console-style clipboard: Ctrl+C copies when there's a selection (otherwise
@@ -1378,7 +1420,24 @@ async function openTerminal(ws: Workspace, opts: { activate?: boolean; sessionId
       navigator.clipboard.readText().then((t2) => t2 && invoke("term_write", { id, data: t2 }));
     }
   });
-  term.onData((d) => { if (sess.spawned) invoke("term_write", { id, data: d }); });
+  term.onData((d) => {
+    if (sess.spawned) invoke("term_write", { id, data: d });
+    // conversation capture (prototype): accumulate printable input, record on Enter
+    if (d === "\r") {
+      const text = sess.inputBuf.trim();
+      if (text) {
+        sess.entries.push({ text, line: term.buffer.active.baseY + term.buffer.active.cursorY, time: Date.now() });
+        renderConvBar(sess);
+      }
+      sess.inputBuf = "";
+    } else if (d === "\x7f") {
+      sess.inputBuf = sess.inputBuf.slice(0, -1);
+    } else if (d === "\x03" || d === "\x04") {
+      sess.inputBuf = "";
+    } else if (/^[\x20-\x7e\u00a0-\uffff]+$/.test(d)) {
+      sess.inputBuf += d; // printable chunk (incl. CJK / IME commits)
+    } // escape sequences and other control chunks: ignore
+  });
   term.onResize(({ cols, rows }) => { if (sess.spawned) invoke("term_resize", { id, cols, rows }); });
   // reflow on window/pane resize (only while attached)
   new ResizeObserver(() => {

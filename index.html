@@ -158,7 +158,13 @@
     .tab-agents { margin-left: auto; border-right: none; border-left: 1px solid var(--border-subtle); }
     .agent-ws { color: var(--text-faint); }
     /* embedded terminal (prototype) */
-    .term-wrap { display: flex; flex-direction: column; height: 100%; }
+    .term-wrap { display: flex; flex-direction: row; height: 100%; }
+    .conv-bar { flex: 0 0 220px; border-left: 1px solid var(--border-subtle); overflow-y: auto; background: var(--bg-sidebar); }
+    .conv-head { padding: 8px 10px; font-size: 0.85rem; font-weight: 600; color: var(--text-faint); }
+    .conv-item { padding: 6px 10px; font-size: 0.88rem; color: var(--text-dim); cursor: pointer; border-bottom: 1px solid var(--border-subtle); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .conv-item:hover { background: var(--bg-hover); color: var(--text); }
+    .conv-item .t { color: var(--text-faint); font-size: 0.78rem; }
+    .conv-empty { padding: 10px; color: var(--text-faint); font-size: 0.88rem; }
     .term-host { flex: 1; overflow: hidden; padding: 8px; background: var(--bg); }
     .term-el { height: 100%; background: var(--bg); }
     .term-el .terminal { height: 100%; background: var(--bg); }
