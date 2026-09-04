@@ -306,9 +306,13 @@ const esc = (s: string) =>
 let statusTimer: number | undefined;
 function setStatus(msg: string, isErr = false) {
   const el = $("status");
+  clearTimeout(statusTimer);
+  if (!msg) {
+    el.className = ""; // empty message = hide, not an empty pill
+    return;
+  }
   el.textContent = msg;
   el.className = "show" + (isErr ? " err" : "");
-  clearTimeout(statusTimer);
   statusTimer = window.setTimeout(() => (el.className = ""), 3000);
 }
 
@@ -1125,6 +1129,32 @@ async function openTerminal(ws: Workspace) {
   el.className = "term-el";
   const sess: TermSession = { term, fit, el, id, wsId: ws.id };
   termSessions.set(id, sess);
+  // console-style clipboard: Ctrl+C copies when there's a selection (otherwise
+  // it's ^C), Ctrl+V pastes; right-click copies the selection or pastes
+  term.attachCustomKeyEventHandler((e) => {
+    if (e.type !== "keydown") return true;
+    const key = e.key.toLowerCase();
+    if (e.ctrlKey && key === "c" && term.hasSelection()) {
+      navigator.clipboard.writeText(term.getSelection());
+      term.clearSelection();
+      return false;
+    }
+    if (e.ctrlKey && key === "v") {
+      navigator.clipboard.readText().then((t2) => t2 && invoke("term_write", { id, data: t2 }));
+      return false;
+    }
+    return true;
+  });
+  el.addEventListener("contextmenu", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (term.hasSelection()) {
+      navigator.clipboard.writeText(term.getSelection());
+      term.clearSelection();
+    } else {
+      navigator.clipboard.readText().then((t2) => t2 && invoke("term_write", { id, data: t2 }));
+    }
+  });
   term.onData((d) => invoke("term_write", { id, data: d }));
   term.onResize(({ cols, rows }) => invoke("term_resize", { id, cols, rows }));
   // reflow on window/pane resize (only while attached)

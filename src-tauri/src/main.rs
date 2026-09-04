@@ -621,7 +621,7 @@ fn launch_agent(workspace_id: String, agent_override: Option<String>) -> Result<
             .spawn()
             .map_err(|e| e.to_string())?;
     }
-    Ok(format!("{prog} {args}  (cwd={cwd})"))
+    Ok(prog)
 }
 
 /// Launch via a new PowerShell console. The command goes into a temp .ps1 so
@@ -654,7 +654,7 @@ fn launch_agent_ps(workspace_id: String, agent_override: Option<String>) -> Resu
             .spawn()
             .map_err(|e| e.to_string())?;
     }
-    Ok(format!("powershell -File {script_path}"))
+    Ok(prog)
 }
 
 fn main() {
