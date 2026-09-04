@@ -237,9 +237,11 @@ fn build_agent(agent: &str, ws: &Workspace, session_id: &str, resume: bool) -> R
 
     let context = build_context(ws);
     let has_ctx = !context.is_empty();
-    // claude/pi let us assign the session id at launch → deterministic resume
+    // claude/pi let us assign the session id at launch → deterministic resume.
+    // Only the embedded terminal path passes a real id; external windows are
+    // fire-and-forget and must not pollute the agent's session list.
     let sid = match agent {
-        "claude" | "pi" => format!("--session-id {} ", quote(session_id)),
+        "claude" | "pi" if !session_id.is_empty() => format!("--session-id {} ", quote(session_id)),
         _ => String::new(),
     };
     // Files attached → full context document in a temp file (multi-line, small
@@ -645,8 +647,8 @@ fn resolve_launch(workspace_id: &str, agent_override: Option<String>, session_id
 
 #[tauri::command]
 fn launch_agent(workspace_id: String, agent_override: Option<String>) -> Result<String, String> {
-    let sid = uuid::Uuid::new_v4().to_string();
-    let (prog, args, cwd) = resolve_launch(&workspace_id, agent_override, &sid, false)?;
+    // external console: no session id (fire-and-forget)
+    let (prog, args, cwd) = resolve_launch(&workspace_id, agent_override, "", false)?;
     // Build ONE command line and hand it to `cmd /c` verbatim. `Command::args`
     // would MSVC-quote the line (inner `"` become `\"`), and cmd's /c parser
     // then mangles it — raw_arg appends the line unquoted, which is exactly
@@ -685,8 +687,7 @@ fn launch_agent(workspace_id: String, agent_override: Option<String>) -> Result<
 /// doubling — cmd_safe already folded `"` to `'` in context text).
 #[tauri::command]
 fn launch_agent_ps(workspace_id: String, agent_override: Option<String>) -> Result<String, String> {
-    let sid = uuid::Uuid::new_v4().to_string();
-    let (prog, args, cwd) = resolve_launch(&workspace_id, agent_override, &sid, false)?;
+    let (prog, args, cwd) = resolve_launch(&workspace_id, agent_override, "", false)?;
     fn psq(s: &str) -> String {
         format!("'{}'", s.replace('\'', "''"))
     }
@@ -894,6 +895,9 @@ mod tests {
         // pi uses the same flag for both
         let (_p, pi_fresh, _c) = build_agent("pi", &w, "my-id", false).unwrap();
         assert!(pi_fresh.contains("--session-id \"my-id\""), "pi fresh: {pi_fresh}");
+        // external launches pass an empty id → no session assignment
+        let (_p, ext, _c) = build_agent("claude", &w, "", false).unwrap();
+        assert!(!ext.contains("--session-id"), "external: {ext}");
     }
 
     #[test]
