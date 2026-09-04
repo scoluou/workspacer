@@ -594,6 +594,26 @@ fn classify_paths(paths: Vec<String>) -> (Vec<String>, Vec<String>) {
         .partition(|p| PathBuf::from(p).is_dir())
 }
 
+/// Darken the Windows title bar / frame to match the app theme (DWM immersive
+/// dark mode). Called by the frontend on startup and every theme switch.
+#[tauri::command]
+fn set_titlebar_dark(win: tauri::Window, dark: bool) {
+    #[cfg(windows)]
+    {
+        #[link(name = "dwmapi")]
+        extern "C" {
+            fn DwmSetWindowAttribute(hwnd: *mut std::ffi::c_void, attr: u32, value: *const i32, size: u32) -> i32;
+        }
+        const DWMWA_USE_IMMERSIVE_DARK_MODE: u32 = 20;
+        if let Ok(hwnd) = win.hwnd() {
+            let val: i32 = if dark { 1 } else { 0 };
+            unsafe {
+                DwmSetWindowAttribute(hwnd.0 as *mut std::ffi::c_void, DWMWA_USE_IMMERSIVE_DARK_MODE, &val, 4);
+            }
+        }
+    }
+}
+
 /// Open a URL in the default browser. rundll32 takes it as a plain argv entry,
 /// so no shell parsing is involved (& in URLs is safe).
 /// UI session state (open tabs, pins, active view) as opaque JSON.
@@ -900,6 +920,7 @@ fn main() {
             redo_workspaces,
             classify_paths,
             open_url,
+            set_titlebar_dark,
             save_ui_state,
             load_ui_state,
             open_data_dir,

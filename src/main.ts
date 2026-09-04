@@ -372,6 +372,8 @@ function applyAppearance() {
   const root = document.documentElement;
   if (settings.theme) root.dataset.theme = settings.theme;
   else delete root.dataset.theme;
+  // darken the Windows title bar to match (light theme keeps it light)
+  invoke("set_titlebar_dark", { dark: settings.theme !== "light" });
   // live-update embedded terminals too (xterm supports runtime theme switch)
   const mono = getComputedStyle(root).getPropertyValue("--mono").trim();
   termSessions.forEach((sess) => {
@@ -568,6 +570,11 @@ function renderNav() {
   $("settingsNav").classList.toggle("active", view.kind === "settings");
 }
 
+// custom titlebar (frameless window): drag via data-tauri-drag-region,
+// double-click toggles maximize (allow-internal-toggle-maximize is in core:default)
+$("tbMin").addEventListener("click", () => getCurrentWebviewWindow().minimize());
+$("tbMax").addEventListener("click", () => getCurrentWebviewWindow().toggleMaximize());
+$("tbClose").addEventListener("click", () => getCurrentWebviewWindow().close()); // our close handler applies the close-action setting
 // logo/title returns home: first workspace, or settings when there are none
 document.querySelector(".sidebar-head")!.addEventListener("click", () => {
   if (workspaces.length) {

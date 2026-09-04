@@ -71,9 +71,21 @@
       margin: 0; background: var(--bg); color: var(--text);
       font-size: 1rem; line-height: 1.5; -webkit-font-smoothing: antialiased;
       overflow: hidden;
+      display: flex; flex-direction: column;
     }
 
-    .layout { display: flex; height: 100vh; }
+    .layout { display: flex; flex: 1; min-height: 0; }
+    /* custom titlebar (frameless window) */
+    .titlebar {
+      height: 32px; flex: 0 0 32px; display: flex; align-items: center;
+      background: var(--bg-sidebar); border-bottom: 1px solid var(--border-subtle);
+      user-select: none;
+    }
+    .titlebar-title { flex: 1; height: 100%; display: flex; align-items: center; padding-left: 12px; font-size: 0.85rem; color: var(--text-dim); }
+    .titlebar-btns { display: flex; height: 100%; }
+    .tb-btn { width: 44px; border: none; background: none; color: var(--text-dim); cursor: pointer; font-size: 0.9rem; }
+    .tb-btn:hover { background: var(--bg-hover); color: var(--text); }
+    .tb-close:hover { background: var(--danger); color: #fff; }
 
     /* ---- sidebar ---- */
     .sidebar {
@@ -321,6 +333,14 @@
   </style>
 </head>
 <body>
+  <div class="titlebar" data-tauri-drag-region>
+    <span class="titlebar-title" data-tauri-drag-region>workspacer</span>
+    <div class="titlebar-btns">
+      <button class="tb-btn" id="tbMin">–</button>
+      <button class="tb-btn" id="tbMax">▢</button>
+      <button class="tb-btn tb-close" id="tbClose">✕</button>
+    </div>
+  </div>
   <div class="layout">
     <aside class="sidebar">
       <div class="sidebar-head">

@@ -16,7 +16,8 @@
         "title": "workspacer",
         "width": 900,
         "height": 640,
-        "visible": false
+        "visible": false,
+        "decorations": false
       }
     ],
     "security": {
