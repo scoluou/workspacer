@@ -160,8 +160,9 @@
     /* embedded terminal (prototype) */
     .term-wrap { display: flex; flex-direction: column; height: 100%; }
     .term-host { flex: 1; overflow: hidden; padding: 8px; background: var(--bg); }
-    .term-el { height: 100%; }
-    .term-el .terminal { height: 100%; }
+    .term-el { height: 100%; background: var(--bg); }
+    .term-el .terminal { height: 100%; background: var(--bg); }
+    .term-el .xterm-viewport { background: var(--bg) !important; }
     .term-el .xterm-viewport::-webkit-scrollbar { width: 8px; }
     .term-el .xterm-viewport::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
     .term-el .xterm-viewport::-webkit-scrollbar-thumb:hover { background: var(--text-faint); }

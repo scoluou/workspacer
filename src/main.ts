@@ -1380,7 +1380,7 @@ async function openTerminal(ws: Workspace) {
   sess.term.focus();
   setStatus(t("launching"));
   try {
-    await invoke("launch_agent_embedded", { workspaceId: ws.id, agentOverride: null, termId: id });
+    await invoke("launch_agent_embedded", { workspaceId: ws.id, agentOverride: null, termId: id, cols: sess.term.cols, rows: sess.term.rows });
     setStatus("");
   } catch (err) {
     setStatus(`${t("launchFailed")}：${err}`, true);
@@ -1823,9 +1823,25 @@ async function reload() {
   settings = await invoke<Settings>("get_settings");
 }
 
+// ---------- UI session state (persist open tabs / pins / active page) ----------
+interface UiState {
+  tabs: { wsId: string; pinned: boolean }[];
+  active: string | null; // wsId or "agents"
+}
+let uiRestored = false;
+function persistUi() {
+  if (!uiRestored) return;
+  const state: UiState = {
+    tabs: openTabs.map((tb) => ({ wsId: tb.wsId, pinned: !!tb.pinned })),
+    active: activeWsId() ?? (view.kind === "agents" ? "agents" : view.kind === "settings" ? "settings" : null),
+  };
+  invoke("save_ui_state", { state });
+}
+
 function render() {
   renderNav();
   renderMain();
+  persistUi();
 }
 
 // suppress the browser's default context menu everywhere except text inputs
@@ -1864,11 +1880,37 @@ document.addEventListener("keydown", async (e) => {
   wireFileDrop();
   wireSplitter();
   getVersion().then((v) => (appVersion = v));
-  if (workspaces.length) {
-    ensureTab(workspaces[0].id);
-    view = { kind: "workspace", id: workspaces[0].id };
-  } else {
-    view = { kind: "settings" };
+  // restore UI session: open tabs (+pins) and the active page. Terminal
+  // sessions are NOT resurrected (resume-by-session-id is a separate idea).
+  let restored = false;
+  const ui = await invoke<UiState | null>("load_ui_state");
+  if (ui) {
+    openTabs = ui.tabs
+      .filter((tb) => workspaces.some((w) => w.id === tb.wsId))
+      .map((tb) => ({ key: `ws:${tb.wsId}`, wsId: tb.wsId, pinned: tb.pinned }));
+    if (ui.active === "agents") {
+      view = { kind: "agents" };
+      restored = true;
+    } else if (ui.active === "settings") {
+      view = { kind: "settings" };
+      restored = true;
+    } else if (ui.active && workspaces.some((w) => w.id === ui.active)) {
+      ensureTab(ui.active);
+      view = { kind: "workspace", id: ui.active };
+      restored = true;
+    } else if (openTabs.length) {
+      view = { kind: "workspace", id: openTabs[openTabs.length - 1].wsId };
+      restored = true;
+    }
   }
+  if (!restored) {
+    if (workspaces.length) {
+      ensureTab(workspaces[0].id);
+      view = { kind: "workspace", id: workspaces[0].id };
+    } else {
+      view = { kind: "settings" };
+    }
+  }
+  uiRestored = true;
   render();
 })();

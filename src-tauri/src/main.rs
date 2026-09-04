@@ -385,14 +385,18 @@ fn launch_agent_embedded(
     workspace_id: String,
     agent_override: Option<String>,
     term_id: u32,
+    cols: u16,
+    rows: u16,
 ) -> Result<String, String> {
     let (prog, args, cwd) = resolve_launch(&workspace_id, agent_override)?;
     // agents are .cmd shims → must run under cmd; our args string is already
     // quoted, and portable-pty joins without re-quoting, so the line survives intact
     let cmdline = if args.is_empty() { prog.clone() } else { format!("{prog} {args}") };
     let pty = native_pty_system();
+    // spawn at the terminal's real size — starting at 80x24 and resizing after
+    // would make the agent draw two frames (the "duplicate display" artifact)
     let pair = pty
-        .openpty(PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 })
+        .openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
         .map_err(|e| e.to_string())?;
     let mut cmd = CommandBuilder::new("cmd.exe");
     cmd.args(["/c", &cmdline]);
@@ -493,6 +497,18 @@ fn classify_paths(paths: Vec<String>) -> (Vec<String>, Vec<String>) {
 
 /// Open a URL in the default browser. rundll32 takes it as a plain argv entry,
 /// so no shell parsing is involved (& in URLs is safe).
+/// UI session state (open tabs, pins, active view) as opaque JSON.
+#[tauri::command]
+fn save_ui_state(state: serde_json::Value) -> Result<(), String> {
+    save("ui-state.json", &state)
+}
+
+#[tauri::command]
+fn load_ui_state() -> Option<serde_json::Value> {
+    let s = fs::read_to_string(data_dir().join("ui-state.json")).ok()?;
+    serde_json::from_str(&s).ok()
+}
+
 #[tauri::command]
 fn open_url(url: String) -> Result<(), String> {
     Command::new("rundll32")
@@ -782,6 +798,8 @@ fn main() {
             redo_workspaces,
             classify_paths,
             open_url,
+            save_ui_state,
+            load_ui_state,
             open_data_dir,
             export_workspaces,
             import_workspaces,
