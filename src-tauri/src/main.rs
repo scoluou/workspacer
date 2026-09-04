@@ -255,9 +255,13 @@ fn build_agent(agent: &str, ws: &Workspace, session_id: &str, resume: bool) -> R
     } else {
         None
     };
+    // the pointer doubles as the session's first message — lead with the
+    // workspace name so session lists (resume pickers) can tell them apart.
+    // single quotes only: the pointer travels quoted through cmd
     let pointer = doc.as_ref().map(|d| {
         format!(
-            "Workspace context file: {}. Read it first for project descriptions and attached file contents.",
+            "Workspace '{}': context file at {}. Read it first for project descriptions and attached file contents.",
+            cmd_safe(&ws.name),
             d.display()
         )
     });
@@ -302,7 +306,8 @@ fn build_agent(agent: &str, ws: &Workspace, session_id: &str, resume: bool) -> R
             ("opencode".into(), args, primary)
         }
         "pi" => {
-            let mut args = sid;
+            // --name makes the session recognizable in pi's resume picker
+            let mut args = format!("{}--name {} ", sid, quote(&cmd_safe(&ws.name)));
             if let Some(d) = &doc {
                 // pi reads the file when the value is an existing path
                 args.push_str(&format!("--append-system-prompt {}", quote(&d.display().to_string())));
@@ -902,6 +907,18 @@ mod tests {
         // external launches pass an empty id → no session assignment
         let (_p, ext, _c) = build_agent("claude", &w, "", false).unwrap();
         assert!(!ext.contains("--session-id"), "external: {ext}");
+    }
+
+    #[test]
+    fn prompts_lead_with_workspace_name() {
+        // a described file triggers the pointer-prompt path
+        let mut w = ws("my-ws", "");
+        w.files = vec![Project { path: "E:/spec.md".into(), description: "d".into() }];
+        let (_p, args, _c) = build_agent("codex", &w, "id", false).unwrap();
+        assert!(args.contains("Workspace 'my-ws':"), "pointer leads with name: {args}");
+        // pi gets a real session name
+        let (_p, pi_args, _c) = build_agent("pi", &w, "id", false).unwrap();
+        assert!(pi_args.contains("--name \"my-ws\""), "pi named: {pi_args}");
     }
 
     #[test]
