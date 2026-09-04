@@ -20,6 +20,7 @@
       --accent-dim: rgba(79, 140, 255, 0.14);
       --danger: #e5534b;
       --green: #4ac26b;
+      --yellow: #d29922;
       --radius: 6px;
       /* Cursor/VS Code editor default (Consolas, Courier New) with an explicit
          CJK floor: Courier New has no CJK, so 中文 lands on YaHei (tight,
@@ -34,7 +35,7 @@
       --border: #d4d7dc; --border-subtle: #e7eaee;
       --text: #1f2328; --text-dim: #5c6169; --text-faint: #8a8f98;
       --accent: #3b76e1; --accent-dim: rgba(59, 118, 225, 0.12);
-      --danger: #d13438; --green: #1a7f37;
+      --danger: #d13438; --green: #1a7f37; --yellow: #9a6700;
     }
     [data-theme="dracula"] {
       --bg: #282a36; --bg-sidebar: #21222c; --bg-raised: #2e3040;
@@ -42,7 +43,7 @@
       --border: #44475a; --border-subtle: #3a3c4e;
       --text: #f8f8f2; --text-dim: #bfc4d6; --text-faint: #6272a4;
       --accent: #bd93f9; --accent-dim: rgba(189, 147, 249, 0.16);
-      --danger: #ff5555; --green: #50fa7b;
+      --danger: #ff5555; --green: #50fa7b; --yellow: #f1fa8c;
     }
     @font-face {
       font-family: "Maple Mono NF CN";
@@ -119,6 +120,9 @@
     #trashDrop.show { opacity: 1; transform: scale(1); }
     #trashDrop.drag-over { border-color: var(--danger); background: var(--danger); transform: scale(1.12); }
     .ws-nav-item.active { background: var(--bg-active); color: var(--text); }
+    .ws-dot { width: 7px; height: 7px; border-radius: 50%; flex: 0 0 auto; margin-right: 2px; }
+    .ws-dot.running { background: var(--green); }
+    .ws-dot.unread { background: var(--yellow, #d29922); }
     .ws-launch {
       margin-left: auto;
       border: none; background: none; color: var(--green); cursor: pointer;

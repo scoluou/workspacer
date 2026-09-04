@@ -502,6 +502,11 @@ function wireDragReorder(els: HTMLElement[], onMove: (from: number, to: number) 
 
 // ---------- sidebar ----------
 function renderNav() {
+  // viewing a terminal marks it read (single place: renderNav runs first in render)
+  if (view.kind === "terminal") {
+    const s = termSessions.get(Number((view as { id: string }).id));
+    if (s) s.unread = false;
+  }
   // static labels
   $("sidebarSection").textContent = t("workspaces");
   $("settingsLabel").textContent = t("settings");
@@ -515,7 +520,13 @@ function renderNav() {
   workspaces.forEach((ws) => {
     const item = document.createElement("div");
     item.className = "ws-nav-item" + (active === ws.id ? " active" : "");
-    item.innerHTML = `<span style="overflow:hidden;text-overflow:ellipsis;">${esc(ws.name)}</span><button class="ws-launch" title="${esc(t("launch"))}">▶</button>`;
+    // status dot: yellow = an exited-but-unread agent (needs attention),
+    // green = an agent is running
+    const sessions = orderOf(ws.id).map((id) => termSessions.get(id)).filter((s) => s !== undefined);
+    const hasUnread = sessions.some((s) => s.exited && s.unread);
+    const hasRunning = sessions.some((s) => !s.exited);
+    const dot = hasUnread ? `<span class="ws-dot unread"></span>` : hasRunning ? `<span class="ws-dot running"></span>` : "";
+    item.innerHTML = `${dot}<span style="overflow:hidden;text-overflow:ellipsis;">${esc(ws.name)}</span><button class="ws-launch" title="${esc(t("launch"))}">▶</button>`;
     item.querySelector(".ws-launch")!.addEventListener("click", (e) => {
       e.stopPropagation(); // launch, not navigate
       launchWs(ws);
@@ -669,12 +680,15 @@ function wireSubTabbar(wsId: string) {
   );
 }
 
-// open a workspace: its most recently used agent tab if any, else the project page
+// open a workspace: an exited-but-unread agent first, then the most recently
+// used one, else the project page
 function openWorkspace(wsId: string) {
   ensureTab(wsId);
   const order = orderOf(wsId);
+  const unread = order.map((id) => termSessions.get(id)).find((s) => s && s.exited && s.unread);
   const last = lastTermByWs.get(wsId) ?? (order.length ? order[order.length - 1] : undefined);
-  view = last !== undefined && termSessions.has(last) ? { kind: "terminal", id: String(last) } : { kind: "workspace", id: wsId };
+  const target = unread?.id ?? last;
+  view = target !== undefined && termSessions.has(target) ? { kind: "terminal", id: String(target) } : { kind: "workspace", id: wsId };
   render();
 }
 function wireTabbar() {
@@ -1399,6 +1413,7 @@ interface TermSession {
   term: Terminal; fit: FitAddon; el: HTMLElement; id: number; wsId: string;
   agentKey: string; sessionId: string; sessionLabel: string; resume: boolean;
   exited: boolean; pinned: boolean; spawned: boolean;
+  unread: boolean; // exited while not being viewed ? yellow dot on the sidebar
   entries: { text: string; line: number; time: number }[]; // submitted prompts
   inputBuf: string; // line currently being typed (conversation capture)
   imeDetach?: () => void;
@@ -1454,6 +1469,7 @@ async function openTerminal(ws: Workspace, opts: { activate?: boolean; sessionId
     spawned: false,
     entries: [...(opts.entries ?? [])],
     inputBuf: "",
+    unread: false,
   };
   termSessions.set(id, sess);
   // console-style clipboard: Ctrl+C copies when there's a selection (otherwise
@@ -1509,8 +1525,10 @@ async function openTerminal(ws: Workspace, opts: { activate?: boolean; sessionId
   await listen<string>(`term-data-${id}`, (e) => term.write(e.payload));
   await listen(`term-exit-${id}`, () => {
     sess.exited = true;
+    // unread if the user isn't looking at this terminal right now
+    sess.unread = !(view.kind === "terminal" && Number((view as { id: string }).id) === id);
     term.write("\r\n\x1b[90m[process exited]\x1b[0m\r\n"); // tab stays until closed
-    render(); // refresh tab labels / agents count
+    render(); // refresh tab labels / agents count / sidebar dots
   });
   ensureTab(ws.id);
   const order = orderOf(ws.id);
