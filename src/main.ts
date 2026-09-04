@@ -762,7 +762,7 @@ function wireTerminal(termId: number) {
   if (sess.el.parentElement !== host) host.appendChild(sess.el);
   renderConvBar(sess);
   if (sess.spawned) {
-    sess.fit.fit();
+    if (sess.el.clientWidth > 0 && sess.el.clientHeight > 0) sess.fit.fit();
   } else {
     startTerminal(sess); // first activation: open xterm + spawn/resume the PTY
   }
@@ -1447,10 +1447,11 @@ async function openTerminal(ws: Workspace, opts: { activate?: boolean; sessionId
       sess.inputBuf += d; // printable chunk (incl. CJK / IME commits)
     } // escape sequences and other control chunks: ignore
   });
-  term.onResize(({ cols, rows }) => { if (sess.spawned) invoke("term_resize", { id, cols, rows }); });
+  // ConPTY dies on a 0x0 resize ? never forward zero dimensions (they happen transiently on tab switches)
+  term.onResize(({ cols, rows }) => { if (sess.spawned && cols > 0 && rows > 0) invoke("term_resize", { id, cols, rows }); });
   // reflow on window/pane resize (only while attached)
   new ResizeObserver(() => {
-    if (sess.el.isConnected && sess.spawned) sess.fit.fit();
+    if (sess.el.isConnected && sess.spawned && sess.el.clientWidth > 0 && sess.el.clientHeight > 0) sess.fit.fit();
   }).observe(el);
   await listen<string>(`term-data-${id}`, (e) => term.write(e.payload));
   await listen(`term-exit-${id}`, () => {

@@ -384,6 +384,10 @@ fn term_write(sessions: tauri::State<PtyMap>, id: u32, data: String) -> Result<(
 
 #[tauri::command]
 fn term_resize(sessions: tauri::State<PtyMap>, id: u32, cols: u16, rows: u16) -> Result<(), String> {
+    // ConPTY kills the hosted process on a 0x0 resize — refuse it
+    if cols == 0 || rows == 0 {
+        return Ok(());
+    }
     let map = sessions.lock().unwrap();
     let s = map.get(&id).ok_or("no such terminal")?;
     s.master
