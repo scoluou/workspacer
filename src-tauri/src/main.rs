@@ -72,6 +72,8 @@ struct Settings {
     theme: Option<String>,
     /// "minimize" (default) | "exit" — what the window close button does
     close_action: Option<String>,
+    /// None/"embedded" (default) | "cmd" | "powershell" — how agents launch
+    launch_mode: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -379,19 +381,7 @@ fn launch_agent_embedded(
     agent_override: Option<String>,
     term_id: u32,
 ) -> Result<String, String> {
-    let ws = load_workspaces()
-        .into_iter()
-        .find(|w| w.id == workspace_id)
-        .ok_or("workspace not found")?;
-    let settings: Settings = load("settings.json");
-    let agent_key = agent_override
-        .or(ws.agent.clone())
-        .or(settings.default_agent)
-        .ok_or("no agent selected and no default configured")?;
-    let (prog, args, cwd) = build_agent(&agent_key, &ws)?;
-    if !on_path(&prog) {
-        return Err(format!("agent '{prog}' is not installed (not found on PATH)"));
-    }
+    let (prog, args, cwd) = resolve_launch(&workspace_id, agent_override)?;
     // agents are .cmd shims → must run under cmd; our args string is already
     // quoted, and portable-pty joins without re-quoting, so the line survives intact
     let cmdline = if args.is_empty() { prog.clone() } else { format!("{prog} {args}") };
@@ -577,32 +567,38 @@ fn list_agents() -> Vec<AgentInfo> {
     .collect()
 }
 
-#[tauri::command]
-fn launch_agent(workspace_id: String, agent_override: Option<String>) -> Result<String, String> {
+/// Shared launch resolution: workspace → agent key → (prog, args, cwd), with
+/// an installed check so a missing agent fails cleanly instead of flashing a
+/// console.
+fn resolve_launch(workspace_id: &str, agent_override: Option<String>) -> Result<(String, String, String), String> {
     let ws = load_workspaces()
         .into_iter()
         .find(|w| w.id == workspace_id)
         .ok_or("workspace not found")?;
-
     // resolve agent: explicit override > workspace default > global default
     let settings: Settings = load("settings.json");
     let agent_key = agent_override
         .or(ws.agent.clone())
         .or(settings.default_agent)
         .ok_or("no agent selected and no default configured")?;
-
     let (prog, args, cwd) = build_agent(&agent_key, &ws)?;
     if !on_path(&prog) {
         return Err(format!("agent '{prog}' is not installed (not found on PATH)"));
     }
+    Ok((prog, args, cwd))
+}
+
+#[tauri::command]
+fn launch_agent(workspace_id: String, agent_override: Option<String>) -> Result<String, String> {
+    let (prog, args, cwd) = resolve_launch(&workspace_id, agent_override)?;
     // Build ONE command line and hand it to `cmd /c` verbatim. `Command::args`
     // would MSVC-quote the line (inner `"` become `\"`), and cmd's /c parser
     // then mangles it — raw_arg appends the line unquoted, which is exactly
     // what cmd expects.
     let cmdline = if args.is_empty() {
-        format!("start \"agent:{agent_key}\" /D {} {prog}", quote(&cwd))
+        format!("start \"agent:{prog}\" /D {} {prog}", quote(&cwd))
     } else {
-        format!("start \"agent:{agent_key}\" /D {} {prog} {args}", quote(&cwd))
+        format!("start \"agent:{prog}\" /D {} {prog} {args}", quote(&cwd))
     };
     // Detach from our process group and any inherited job object, so the agent
     // terminal outlives workspacer (e.g. when workspacer itself was started
@@ -626,6 +622,39 @@ fn launch_agent(workspace_id: String, agent_override: Option<String>) -> Result<
             .map_err(|e| e.to_string())?;
     }
     Ok(format!("{prog} {args}  (cwd={cwd})"))
+}
+
+/// Launch via a new PowerShell console. The command goes into a temp .ps1 so
+/// nothing passes through two shell parsers (PS quoting: single quotes with ''
+/// doubling — cmd_safe already folded `"` to `'` in context text).
+#[tauri::command]
+fn launch_agent_ps(workspace_id: String, agent_override: Option<String>) -> Result<String, String> {
+    let (prog, args, cwd) = resolve_launch(&workspace_id, agent_override)?;
+    fn psq(s: &str) -> String {
+        format!("'{}'", s.replace('\'', "''"))
+    }
+    let mut script = format!("Set-Location -LiteralPath {}\r\n& {}", psq(&cwd), psq(&prog));
+    for a in split_args(&args) {
+        script.push_str(&format!(" {}", psq(&a)));
+    }
+    let tmp = std::env::temp_dir().join(format!("workspacer-launch-{}.ps1", workspace_id));
+    fs::write(&tmp, &script).map_err(|e| e.to_string())?;
+    const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
+    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+    const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
+    let script_path = tmp.to_string_lossy().into_owned();
+    let mut c = Command::new("powershell.exe");
+    c.args(["-NoExit", "-File", &script_path])
+        .creation_flags(CREATE_NEW_CONSOLE | CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB);
+    if c.spawn().is_err() {
+        // job objects may forbid breakaway: retry without it
+        Command::new("powershell.exe")
+            .args(["-NoExit", "-File", &script_path])
+            .creation_flags(CREATE_NEW_CONSOLE | CREATE_NEW_PROCESS_GROUP)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(format!("powershell -File {script_path}"))
 }
 
 fn main() {
@@ -743,6 +772,7 @@ fn main() {
             list_agents,
             launch_agent,
             launch_agent_embedded,
+            launch_agent_ps,
             term_write,
             term_resize,
             term_kill

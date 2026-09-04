@@ -23,6 +23,7 @@ interface Settings {
   sidebarWidth: number | null;
   theme: string | null;
   closeAction: string | null;
+  launchMode: string | null;
 }
 
 type View = { kind: "workspace"; id: string } | { kind: "create" } | { kind: "settings" } | { kind: "terminal"; id: string };
@@ -80,6 +81,12 @@ const DICT: Record<string, Record<string, string>> = {
     versionName: "版本",
     defaultAgentName: "默认 agent",
     defaultAgentHint: "启动 workspace 时使用的 coding agent",
+    launchModeName: "启动方式",
+    launchModeHint: "内置终端在标签页内嵌运行；cmd/PowerShell 开独立控制台窗口",
+    launchModeEmbedded: "内置终端",
+    launchModeCmd: "cmd 窗口",
+    launchModePs: "PowerShell 窗口",
+    launchModeSet: "启动方式设为",
     fontName: "字体",
     fontHint: "界面等宽字体（中文使用微软雅黑）",
     fontDefault: "默认",
@@ -194,6 +201,12 @@ const DICT: Record<string, Record<string, string>> = {
     versionName: "Version",
     defaultAgentName: "Default agent",
     defaultAgentHint: "The coding agent used when launching a workspace",
+    launchModeName: "Launch mode",
+    launchModeHint: "Embedded runs in a tab; cmd/PowerShell open a separate console window",
+    launchModeEmbedded: "Embedded terminal",
+    launchModeCmd: "cmd window",
+    launchModePs: "PowerShell window",
+    launchModeSet: "Launch mode set to",
     fontName: "Font",
     fontHint: "UI monospace font (CJK uses Microsoft YaHei)",
     fontDefault: "Default",
@@ -268,7 +281,7 @@ function t(key: string): string {
 }
 
 let agents: AgentInfo[] = [];
-let settings: Settings = { defaultAgent: null, fontFamily: null, fontSize: null, fontWeight: null, language: null, sidebarWidth: null, theme: null, closeAction: null };
+let settings: Settings = { defaultAgent: null, fontFamily: null, fontSize: null, fontWeight: null, language: null, sidebarWidth: null, theme: null, closeAction: null, launchMode: null };
 let appVersion = "";
 let workspaces: Workspace[] = [];
 let view: View = { kind: "settings" };
@@ -657,6 +670,17 @@ function settingsHtml(): string {
           <select id="setDefaultAgent">${agentOptions(settings.defaultAgent, null)}</select>
         </div>
       </div>
+      <div class="setting-row">
+        <div class="setting-label">
+          <div class="name">${esc(t("launchModeName"))}</div>
+          <div class="hint">${esc(t("launchModeHint"))}</div>
+        </div>
+        <div class="setting-control"><select id="setLaunchMode">
+          <option value="">${esc(t("launchModeEmbedded"))}</option>
+          <option value="cmd" ${settings.launchMode === "cmd" ? "selected" : ""}>${esc(t("launchModeCmd"))}</option>
+          <option value="powershell" ${settings.launchMode === "powershell" ? "selected" : ""}>${esc(t("launchModePs"))}</option>
+        </select></div>
+      </div>
     </div>
 
     <div class="settings-group">
@@ -715,6 +739,11 @@ function wireSettings() {
     const val = (e.target as HTMLSelectElement).value || null;
     await patchSettings({ defaultAgent: val });
     setStatus(val ? `${t("defaultAgentSet")} ${agentLabel(val)}` : t("defaultAgentCleared"));
+  });
+  $("setLaunchMode").addEventListener("change", async (e) => {
+    const sel = e.target as HTMLSelectElement;
+    await patchSettings({ launchMode: sel.value || null });
+    setStatus(`${t("launchModeSet")} ${sel.selectedOptions[0]?.textContent ?? ""}`);
   });
   $("setFont").addEventListener("change", async (e) => {
     const val = (e.target as HTMLSelectElement).value || null;
@@ -1054,9 +1083,19 @@ async function openTerminal(ws: Workspace) {
 }
 
 // workspace actions usable from sidebar context menu
-// PROTOTYPE: launch goes to the embedded terminal instead of an external window
+// launch mode: embedded terminal tab (default) | cmd window | powershell window
 async function launchWs(ws: Workspace) {
-  await openTerminal(ws);
+  const mode = settings.launchMode ?? "embedded";
+  if (mode === "embedded") {
+    await openTerminal(ws);
+    return;
+  }
+  setStatus(t("launching"));
+  try {
+    const cmd = mode === "powershell" ? "launch_agent_ps" : "launch_agent";
+    const r = await invoke<string>(cmd, { workspaceId: ws.id, agentOverride: null });
+    setStatus(`${t("launched")}：${r}`);
+  } catch (err) { setStatus(`${t("launchFailed")}：${err}`, true); }
 }
 async function renameWs(ws: Workspace) {
   const trimmed = await modal({ title: t("rename"), input: ws.name, okLabel: t("rename") });
