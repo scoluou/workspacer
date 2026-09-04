@@ -1668,13 +1668,7 @@ function wireWorkspaceDetail(ws: Workspace) {
     await reload();
     render();
   });
-  $("launchBtn").addEventListener("click", async () => {
-    setStatus(t("launching"));
-    try {
-      const r = await invoke<string>("launch_agent", { workspaceId: ws.id, agentOverride: null });
-      setStatus(`${t("launched")}：${r}`);
-    } catch (err) { setStatus(`${t("launchFailed")}：${err}`, true); }
-  });
+  $("launchBtn").addEventListener("click", () => launchWs(ws)); // goes through the launch-mode setting
 }
 
 // ---------- OS file drop ----------
