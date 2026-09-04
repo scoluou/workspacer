@@ -2,6 +2,10 @@ import { invoke } from "@tauri-apps/api/core";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { getVersion } from "@tauri-apps/api/app";
+import { listen } from "@tauri-apps/api/event";
+import { Terminal } from "@xterm/xterm";
+import { FitAddon } from "@xterm/addon-fit";
+import "@xterm/xterm/css/xterm.css";
 
 interface Project { path: string; description: string; }
 interface Workspace {
@@ -21,7 +25,7 @@ interface Settings {
   closeAction: string | null;
 }
 
-type View = { kind: "workspace"; id: string } | { kind: "create" } | { kind: "settings" };
+type View = { kind: "workspace"; id: string } | { kind: "create" } | { kind: "settings" } | { kind: "terminal"; id: string };
 
 // ---------- i18n ----------
 const DICT: Record<string, Record<string, string>> = {
@@ -137,6 +141,7 @@ const DICT: Record<string, Record<string, string>> = {
     undone: "已撤销",
     redone: "已恢复",
     nothingToUndo: "没有可撤销的操作",
+    closeTerminal: "关闭终端",
   },
   en: {
     workspaces: "Work Spaces",
@@ -249,6 +254,7 @@ const DICT: Record<string, Record<string, string>> = {
     undone: "Undone",
     redone: "Redone",
     nothingToUndo: "Nothing to undo",
+    closeTerminal: "Close terminal",
   },
 };
 
@@ -500,12 +506,44 @@ $("settingsNav").addEventListener("click", () => {
 // ---------- main router ----------
 function renderMain() {
   const main = $("main");
+  main.classList.toggle("main-flush", view.kind === "terminal");
   if (view.kind === "create") {
     main.innerHTML = createFormHtml();
     wireCreateForm();
   } else if (view.kind === "settings") {
     main.innerHTML = settingsHtml();
     wireSettings();
+  } else if (view.kind === "terminal") {
+    const wsId = view.id;
+    const name = workspaces.find((w) => w.id === wsId)?.name ?? "";
+    main.innerHTML = `
+    <div class="term-wrap">
+      <div class="term-bar">
+        <button class="btn btn-ghost btn-sm" id="termBack">← ${esc(t("back"))}</button>
+        <span class="term-title">${esc(name)}</span>
+        <span class="spacer"></span>
+        <button class="btn btn-ghost btn-sm" id="termKill" title="${esc(t("closeTerminal"))}">✕</button>
+      </div>
+      <div class="term-host" id="termHost"></div>
+    </div>`;
+    // re-attach a live session's DOM after any re-render
+    const sess = termSessions.get(wsId);
+    if (sess) {
+      const host = $("termHost");
+      if (sess.el.parentElement !== host) host.appendChild(sess.el);
+      if (sess.term.element) sess.fit.fit();
+    }
+    $("termBack").addEventListener("click", () => { view = { kind: "workspace", id: wsId }; render(); });
+    $("termKill").addEventListener("click", async () => {
+      const s = termSessions.get(wsId);
+      if (s) {
+        await invoke("term_kill", { id: s.id });
+        s.term.dispose();
+        termSessions.delete(wsId);
+      }
+      view = { kind: "workspace", id: wsId };
+      render();
+    });
   } else {
     const ws = workspaces.find((w) => w.id === (view as { id: string }).id);
     if (!ws) { view = { kind: "settings" }; renderMain(); return; }
@@ -876,13 +914,61 @@ function triggerWsDescEdit() {
   setTimeout(() => wsDescTrigger?.(), 0);
 }
 
+// ---------- embedded terminal (PROTOTYPE — experiment branch) ----------
+interface TermSession { term: Terminal; fit: FitAddon; el: HTMLElement; id: number; }
+const termSessions = new Map<string, TermSession>(); // workspaceId -> session
+let nextTermId = 1;
+
+async function openTerminal(ws: Workspace) {
+  let sess = termSessions.get(ws.id);
+  const isNew = !sess;
+  if (!sess) {
+    const id = nextTermId++;
+    const cs = getComputedStyle(document.documentElement);
+    const term = new Terminal({
+      fontFamily: cs.getPropertyValue("--mono").trim() || "monospace",
+      fontSize: settings.fontSize ?? 13,
+      theme: {
+        background: cs.getPropertyValue("--bg").trim() || undefined,
+        foreground: cs.getPropertyValue("--text").trim() || undefined,
+      },
+    });
+    const fit = new FitAddon();
+    term.loadAddon(fit);
+    const el = document.createElement("div");
+    el.className = "term-el";
+    sess = { term, fit, el, id };
+    termSessions.set(ws.id, sess);
+    term.onData((d) => invoke("term_write", { id, data: d }));
+    term.onResize(({ cols, rows }) => invoke("term_resize", { id, cols, rows }));
+    await listen<string>(`term-data-${id}`, (e) => term.write(e.payload));
+    await listen(`term-exit-${id}`, () => {
+      term.write("\r\n\x1b[90m[process exited]\x1b[0m\r\n");
+      termSessions.delete(ws.id); // next launch spawns a fresh session
+    });
+  }
+  view = { kind: "terminal", id: ws.id };
+  render();
+  const host = $("termHost");
+  if (sess.el.parentElement !== host) host.appendChild(sess.el);
+  if (!sess.term.element) sess.term.open(sess.el);
+  sess.fit.fit();
+  sess.term.focus();
+  if (isNew) {
+    setStatus(t("launching"));
+    try {
+      await invoke("launch_agent_embedded", { workspaceId: ws.id, agentOverride: null, termId: sess.id });
+      setStatus("");
+    } catch (err) {
+      setStatus(`${t("launchFailed")}：${err}`, true);
+    }
+  }
+}
+
 // workspace actions usable from sidebar context menu
+// PROTOTYPE: launch goes to the embedded terminal instead of an external window
 async function launchWs(ws: Workspace) {
-  setStatus(t("launching"));
-  try {
-    const r = await invoke<string>("launch_agent", { workspaceId: ws.id, agentOverride: null });
-    setStatus(`${t("launched")}：${r}`);
-  } catch (err) { setStatus(`${t("launchFailed")}：${err}`, true); }
+  await openTerminal(ws);
 }
 async function renameWs(ws: Workspace) {
   const trimmed = await modal({ title: t("rename"), input: ws.name, okLabel: t("rename") });

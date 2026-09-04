@@ -309,6 +309,120 @@ fn on_path(prog: &str) -> bool {
         .unwrap_or(false)
 }
 
+// ---------- embedded terminal (PROTOTYPE — experiment/embedded-terminal) ----------
+use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
+use std::io::{Read, Write};
+use tauri::Emitter;
+
+struct PtySession {
+    writer: Box<dyn Write + Send>,
+    child: Box<dyn Child + Send + Sync>,
+    master: Box<dyn MasterPty + Send>,
+}
+
+type PtyMap = Mutex<std::collections::HashMap<u32, PtySession>>;
+
+/// Split our pre-quoted arg string into argv (quotes only wrap, never embedded —
+/// cmd_safe guarantees that for context, and paths can't contain `"`).
+/// PROTOTYPE: exists because build_agent predates the PTY path.
+fn split_args(s: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut in_q = false;
+    for c in s.chars() {
+        match c {
+            '"' => in_q = !in_q,
+            ' ' if !in_q => {
+                if !cur.is_empty() {
+                    out.push(std::mem::take(&mut cur));
+                }
+            }
+            c => cur.push(c),
+        }
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    out
+}
+
+#[tauri::command]
+fn term_write(sessions: tauri::State<PtyMap>, id: u32, data: String) -> Result<(), String> {
+    let mut map = sessions.lock().unwrap();
+    let s = map.get_mut(&id).ok_or("no such terminal")?;
+    s.writer.write_all(data.as_bytes()).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn term_resize(sessions: tauri::State<PtyMap>, id: u32, cols: u16, rows: u16) -> Result<(), String> {
+    let map = sessions.lock().unwrap();
+    let s = map.get(&id).ok_or("no such terminal")?;
+    s.master
+        .resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn term_kill(sessions: tauri::State<PtyMap>, id: u32) -> Result<(), String> {
+    let mut map = sessions.lock().unwrap();
+    if let Some(mut s) = map.remove(&id) {
+        let _ = s.child.kill();
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn launch_agent_embedded(
+    app: tauri::AppHandle,
+    sessions: tauri::State<PtyMap>,
+    workspace_id: String,
+    agent_override: Option<String>,
+    term_id: u32,
+) -> Result<String, String> {
+    let ws = load_workspaces()
+        .into_iter()
+        .find(|w| w.id == workspace_id)
+        .ok_or("workspace not found")?;
+    let settings: Settings = load("settings.json");
+    let agent_key = agent_override
+        .or(ws.agent.clone())
+        .or(settings.default_agent)
+        .ok_or("no agent selected and no default configured")?;
+    let (prog, args, cwd) = build_agent(&agent_key, &ws)?;
+    if !on_path(&prog) {
+        return Err(format!("agent '{prog}' is not installed (not found on PATH)"));
+    }
+    // agents are .cmd shims → must run under cmd; our args string is already
+    // quoted, and portable-pty joins without re-quoting, so the line survives intact
+    let cmdline = if args.is_empty() { prog.clone() } else { format!("{prog} {args}") };
+    let pty = native_pty_system();
+    let pair = pty
+        .openpty(PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 })
+        .map_err(|e| e.to_string())?;
+    let mut cmd = CommandBuilder::new("cmd.exe");
+    cmd.args(["/c", &cmdline]);
+    cmd.cwd(cwd);
+    let child = pair.slave.spawn_command(cmd).map_err(|e| e.to_string())?;
+    let writer = pair.master.take_writer().map_err(|e| e.to_string())?;
+    let mut reader = pair.master.try_clone_reader().map_err(|e| e.to_string())?;
+    let data_event = format!("term-data-{term_id}");
+    let exit_event = format!("term-exit-{term_id}");
+    std::thread::spawn(move || {
+        let mut buf = [0u8; 16384];
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    let _ = app.emit(&data_event, String::from_utf8_lossy(&buf[..n]).into_owned());
+                }
+            }
+        }
+        let _ = app.emit(&exit_event, ());
+    });
+    sessions.lock().unwrap().insert(term_id, PtySession { writer, child, master: pair.master });
+    Ok(prog)
+}
+
 // ---------- Tauri commands ----------
 #[tauri::command]
 fn list_workspaces() -> Vec<Workspace> {
@@ -517,6 +631,7 @@ fn launch_agent(workspace_id: String, agent_override: Option<String>) -> Result<
 fn main() {
     use tauri::Manager;
     tauri::Builder::default()
+        .manage(Mutex::new(std::collections::HashMap::<u32, PtySession>::new()))
         // single instance first: a second launch just shows the existing window
         // (tray-resident apps must not run twice — both would write workspaces.json)
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
@@ -626,7 +741,11 @@ fn main() {
             get_settings,
             save_settings,
             list_agents,
-            launch_agent
+            launch_agent,
+            launch_agent_embedded,
+            term_write,
+            term_resize,
+            term_kill
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

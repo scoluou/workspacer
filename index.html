@@ -134,6 +134,15 @@
     }
     .splitter:hover, .splitter.dragging { background: var(--accent-dim, rgba(79,140,255,0.25)); }
     .main { flex: 1; overflow-y: auto; padding: 24px 28px 60px; }
+    .main-flush { padding: 0; overflow: hidden; }
+    /* embedded terminal (prototype) */
+    .term-wrap { display: flex; flex-direction: column; height: 100%; }
+    .term-bar { display: flex; align-items: center; gap: 8px; padding: 6px 10px; border-bottom: 1px solid var(--border-subtle); }
+    .term-title { font-size: 0.95rem; color: var(--text-dim); }
+    .term-bar .spacer { flex: 1; }
+    .term-host { flex: 1; overflow: hidden; padding: 4px 0 4px 8px; }
+    .term-el { height: 100%; }
+    .term-el .terminal { height: 100%; }
     .main-head { margin-bottom: 20px; }
     .main-head h1 { font-size: 1.54rem; font-weight: 600; margin: 0 0 4px; letter-spacing: -0.01em; }
     .main-head p { margin: 0; color: var(--text-dim); font-size: 1rem; }
