@@ -616,9 +616,65 @@ fn set_titlebar_dark(win: tauri::Window, dark: bool) {
 
 /// Open a URL in the default browser. rundll32 takes it as a plain argv entry,
 /// so no shell parsing is involved (& in URLs is safe).
+/// claude stores sessions at ~/.claude/projects/<cwd with non-alnum → '-'>
+fn claude_project_dir_name(cwd: &str) -> String {
+    cwd.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect()
+}
+/// pi stores sessions at ~/.pi/agent/sessions/--<cwd with / \ : → '-'>--
+fn pi_session_dir_name(cwd: &str) -> String {
+    format!("--{}--", cwd.trim_start_matches(['/', '\\']).replace(['/', '\\', ':'], "-"))
+}
+
+/// Re-resolve the live session id for claude/pi terminals: the user may have
+/// /resume-switched inside the agent, and the newest session file by mtime is
+/// the one currently loaded. ponytail: with several terminals on the same cwd
+/// this picks the same file for all of them — accepted, that's rare.
+fn live_session_id(agent: &str, cwd: &str, assigned: &str) -> String {
+    let dir = match agent {
+        "claude" => dirs::home_dir().unwrap_or_default().join(".claude").join("projects").join(claude_project_dir_name(cwd)),
+        "pi" => dirs::home_dir().unwrap_or_default().join(".pi").join("agent").join("sessions").join(pi_session_dir_name(cwd)),
+        _ => return assigned.to_string(),
+    };
+    fs::read_dir(&dir)
+        .ok()
+        .into_iter()
+        .flatten()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().is_some_and(|x| x == "jsonl"))
+        .max_by_key(|e| e.metadata().and_then(|m| m.modified()).ok())
+        .and_then(|e| e.path().file_stem().map(|s| s.to_string_lossy().into_owned()))
+        .unwrap_or_else(|| assigned.to_string())
+}
+
 /// UI session state (open tabs, pins, active view) as opaque JSON.
+/// Terminal session ids are re-resolved on the way in: the user may have
+/// /resume-switched inside the agent, and the file on disk is the truth.
 #[tauri::command]
 fn save_ui_state(state: serde_json::Value) -> Result<(), String> {
+    let mut state = state;
+    if let Some(terms) = state.get_mut("terms").and_then(|t| t.as_array_mut()) {
+        let workspaces = load_workspaces();
+        for term in terms.iter_mut() {
+            let agent = term.get("agentKey").and_then(|v| v.as_str()).unwrap_or("");
+            if agent != "claude" && agent != "pi" {
+                continue; // only these two have deterministic session ids
+            }
+            let ws_id = term.get("wsId").and_then(|v| v.as_str()).unwrap_or("");
+            let cwd = workspaces
+                .iter()
+                .find(|w| w.id == ws_id)
+                .and_then(|w| w.projects.first().map(|p| p.path.clone()))
+                .unwrap_or_default();
+            if cwd.is_empty() {
+                continue;
+            }
+            let assigned = term.get("sessionId").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let live = live_session_id(agent, &cwd, &assigned);
+            if live != assigned {
+                term["sessionId"] = serde_json::Value::String(live);
+            }
+        }
+    }
     save("ui-state.json", &state)
 }
 
@@ -1019,6 +1075,13 @@ mod tests {
     fn on_path_resolves_via_patext() {
         assert!(on_path("cmd")); // System32\cmd.exe is always on PATH
         assert!(!on_path("definitely-not-a-real-program-xyz"));
+    }
+
+    #[test]
+    fn session_dir_encodings() {
+        assert_eq!(claude_project_dir_name("E:\\workspacer"), "E--workspacer");
+        assert_eq!(claude_project_dir_name("C:\\Users\\xu.lu"), "C--Users-xu-lu");
+        assert_eq!(pi_session_dir_name("E:\\workspacer"), "--E--workspacer--");
     }
 
     #[test]
