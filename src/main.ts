@@ -27,7 +27,12 @@ interface Settings {
   launchMode: string | null;
 }
 
-type View = { kind: "workspace"; id: string } | { kind: "create" } | { kind: "settings" } | { kind: "terminal"; id: string };
+type View =
+  | { kind: "workspace"; id: string }
+  | { kind: "create" }
+  | { kind: "settings" }
+  | { kind: "terminal"; id: string }
+  | { kind: "agents" };
 
 // ---------- i18n ----------
 const DICT: Record<string, Record<string, string>> = {
@@ -159,6 +164,11 @@ const DICT: Record<string, Record<string, string>> = {
     closeThis: "关闭",
     closeOthers: "关闭其他",
     closeAll: "全部关闭",
+    agentsTab: "所有 agent",
+    agentsTitle: "运行中的 agent",
+    noAgents: "没有运行中的 agent",
+    statusRunning: "运行中",
+    statusExited: "已退出",
   },
   en: {
     workspaces: "Work Spaces",
@@ -287,6 +297,11 @@ const DICT: Record<string, Record<string, string>> = {
     closeThis: "Close",
     closeOthers: "Close others",
     closeAll: "Close all",
+    agentsTab: "All agents",
+    agentsTitle: "Running agents",
+    noAgents: "No running agents",
+    statusRunning: "Running",
+    statusExited: "Exited",
   },
 };
 
@@ -485,16 +500,10 @@ function renderNav() {
   if (workspaces.length === 0) {
     nav.innerHTML = `<div style="padding:8px 10px;color:var(--text-faint);font-size:0.92rem;">${esc(t("noWorkspaceYet"))}</div>`;
   }
-  let activeWsId: string | null = null;
-  if (view.kind === "workspace") {
-    activeWsId = view.id;
-  } else if (view.kind === "terminal") {
-    const tid = view.id; // const: narrowing survives into the find callback
-    activeWsId = openTabs.find((tb) => tb.key === `term:${tid}`)?.wsId ?? null;
-  }
+  const active = activeWsId();
   workspaces.forEach((ws) => {
     const item = document.createElement("div");
-    item.className = "ws-nav-item" + (activeWsId === ws.id ? " active" : "");
+    item.className = "ws-nav-item" + (active === ws.id ? " active" : "");
     item.innerHTML = `<span style="overflow:hidden;text-overflow:ellipsis;">${esc(ws.name)}</span><button class="ws-launch" title="${esc(t("launch"))}">▶</button>`;
     item.querySelector(".ws-launch")!.addEventListener("click", (e) => {
       e.stopPropagation(); // launch, not navigate
@@ -502,7 +511,7 @@ function renderNav() {
     });
     item.addEventListener("click", () => {
       if (Date.now() < suppressClickUntil) return; // just finished dragging, not a navigation click
-      ensureTab("workspace", ws.id);
+      ensureTab(ws.id);
       view = { kind: "workspace", id: ws.id };
       render();
     });
@@ -534,7 +543,7 @@ function renderNav() {
 // logo/title returns home: first workspace, or settings when there are none
 document.querySelector(".sidebar-head")!.addEventListener("click", () => {
   if (workspaces.length) {
-    ensureTab("workspace", workspaces[0].id);
+    ensureTab(workspaces[0].id);
     view = { kind: "workspace", id: workspaces[0].id };
   } else {
     view = { kind: "settings" };
@@ -557,91 +566,149 @@ $("settingsNav").addEventListener("click", () => {
 // ---------- main router ----------
 function tabbarHtml(): string {
   if (!openTabs.length) return "";
-  const active = activeTabKey();
-  return `<div class="tabbar">${openTabs
+  const activeTop =
+    view.kind === "workspace"
+      ? `ws:${(view as { id: string }).id}`
+      : view.kind === "terminal"
+        ? `ws:${termSessions.get(Number((view as { id: string }).id))?.wsId ?? ""}`
+        : view.kind === "agents"
+          ? "agents"
+          : null;
+  const running = [...termSessions.values()].filter((s) => !s.exited).length;
+  const tabs = openTabs
     .map((tb) => {
       const name = workspaces.find((w) => w.id === tb.wsId)?.name ?? "?";
-      const label = `${tb.kind === "terminal" ? "&gt;_ " : ""}${esc(name)}`;
-      const tail =
-        tb.kind === "workspace"
-          ? "" // workspace tabs are unclosable
-          : tb.pinned
-            ? `<span class="tab-close tab-pin" data-pin="${tb.key}" title="${esc(t("unpin"))}">📌</span>`
-            : `<span class="tab-close" data-close="${tb.key}" title="${esc(t("closeTab"))}">✕</span>`;
-      return `<div class="tab${tb.key === active ? " active" : ""}" data-tab="${tb.key}"><span class="tab-label">${label}</span>${tail}</div>`;
+      return `<div class="tab${tb.key === activeTop ? " active" : ""}" data-tab="${tb.key}"><span class="tab-label">${esc(name)}</span></div>`;
+    })
+    .join("");
+  return `<div class="tabbar">${tabs}<div class="tab tab-agents${view.kind === "agents" ? " active" : ""}" data-tab="agents"><span class="tab-label">⚡ ${esc(t("agentsTab"))}${running ? ` (${running})` : ""}</span></div></div>`;
+}
+
+// sub-tab bar: the active workspace's terminal sessions
+function subTabbarHtml(wsId: string): string {
+  const ids = orderOf(wsId);
+  if (!ids.length) return "";
+  const activeId = view.kind === "terminal" ? Number((view as { id: string }).id) : null;
+  const seen = new Map<string, number>();
+  return `<div class="tabbar subtabbar">${ids
+    .map((tid) => {
+      const s = termSessions.get(tid);
+      if (!s) return "";
+      const n = (seen.get(s.agentKey) ?? 0) + 1;
+      seen.set(s.agentKey, n);
+      const label = `&gt;_ ${esc(agentLabel(s.agentKey))}${n > 1 ? ` ${n}` : ""}${s.exited ? ` (${esc(t("statusExited"))})` : ""}`;
+      const tail = s.pinned
+        ? `<span class="tab-close tab-pin" data-subpin="${tid}" title="${esc(t("unpin"))}">📌</span>`
+        : `<span class="tab-close" data-subclose="${tid}" title="${esc(t("closeTab"))}">✕</span>`;
+      return `<div class="tab${tid === activeId ? " active" : ""}${s.exited ? " exited" : ""}" data-subtab="${tid}"><span class="tab-label">${label}</span>${tail}</div>`;
     })
     .join("")}</div>`;
 }
 
+function wireSubTabbar(wsId: string) {
+  const els = Array.from(document.querySelectorAll<HTMLElement>(".subtabbar .tab"));
+  wireDragReorder(els, async (from, to) => {
+    const order = orderOf(wsId);
+    order.splice(to, 0, ...order.splice(from, 1));
+    render();
+  }, undefined, "x");
+  els.forEach((el) => {
+    const tid = Number(el.dataset.subtab);
+    el.addEventListener("click", (e) => {
+      if (Date.now() < suppressClickUntil) return;
+      if ((e.target as HTMLElement).closest(".tab-close, .tab-pin")) return;
+      view = { kind: "terminal", id: String(tid) };
+      render();
+    });
+    el.addEventListener("auxclick", (e) => {
+      if (e.button === 1) closeSubTabs(wsId, [tid]);
+    });
+    el.addEventListener("contextmenu", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const s = termSessions.get(tid);
+      if (!s) return;
+      showCtxMenu(e.clientX, e.clientY, [
+        { label: t(s.pinned ? "unpin" : "pin"), onClick: () => pinSubTab(wsId, tid) },
+        ...(!s.pinned ? [{ label: t("closeThis"), onClick: () => closeSubTabs(wsId, [tid]) }] : []),
+        { label: t("closeOthers"), onClick: () => closeSubTabs(wsId, orderOf(wsId).filter((id) => id !== tid && !termSessions.get(id)?.pinned)) },
+        { label: t("closeAll"), onClick: () => closeSubTabs(wsId, orderOf(wsId).filter((id) => !termSessions.get(id)?.pinned)) },
+      ]);
+    });
+  });
+  document.querySelectorAll<HTMLElement>("[data-subclose]").forEach((el) =>
+    el.addEventListener("click", (e) => {
+      e.stopPropagation();
+      closeSubTabs(wsId, [Number((el as HTMLElement).dataset.subclose)]);
+    })
+  );
+  document.querySelectorAll<HTMLElement>("[data-subpin]").forEach((el) =>
+    el.addEventListener("click", (e) => {
+      e.stopPropagation();
+      pinSubTab(wsId, Number((el as HTMLElement).dataset.subpin));
+    })
+  );
+}
+
 function wireTabbar() {
-  const tabEls = Array.from(document.querySelectorAll<HTMLElement>(".tab"));
-  // tabs are drag-reorderable (horizontal)
-  wireDragReorder(tabEls, async (from, to) => {
+  const tabEls = Array.from(document.querySelectorAll<HTMLElement>(".tab[data-tab]"));
+  // workspace tabs are drag-reorderable; the agents tab is fixed at the end
+  wireDragReorder(tabEls.filter((el) => el.dataset.tab !== "agents"), async (from, to) => {
     openTabs.splice(to, 0, ...openTabs.splice(from, 1));
     render();
   }, undefined, "x");
   tabEls.forEach((el) => {
     const key = el.dataset.tab!;
-    el.addEventListener("click", (e) => {
+    el.addEventListener("click", () => {
       if (Date.now() < suppressClickUntil) return; // trailing click after a drag
-      if ((e.target as HTMLElement).closest(".tab-close, .tab-pin")) return;
-      const tb = openTabs.find((x) => x.key === key);
-      if (tb) {
-        view = tabToView(tb);
-        render();
+      if (key === "agents") {
+        view = { kind: "agents" };
+      } else {
+        view = { kind: "workspace", id: key.slice(3) };
       }
-    });
-    el.addEventListener("auxclick", (e) => {
-      if (e.button === 1) closeTab(key); // middle click
-    });
-    el.addEventListener("contextmenu", (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      const tb = openTabs.find((x) => x.key === key);
-      if (!tb) return;
-      const closable = tb.kind === "terminal" && !tb.pinned;
-      showCtxMenu(e.clientX, e.clientY, [
-        // pin is for terminal tabs; workspace tabs are permanent anyway
-        ...(tb.kind === "terminal"
-          ? [{
-              label: t(tb.pinned ? "unpin" : "pin"),
-              onClick: () => {
-                if (tb.pinned) {
-                  tb.pinned = false; // unpin: stays in place
-                  render();
-                } else {
-                  pinTab(key); // pin: moves to the front group
-                  render();
-                }
-              },
-            }]
-          : []),
-        ...(closable ? [{ label: t("closeThis"), onClick: () => closeTab(key) }] : []),
-        { label: t("closeOthers"), onClick: () => closeOtherTabs(key) },
-        { label: t("closeAll"), onClick: () => closeAllTabs() },
-      ]);
+      render();
     });
   });
-  document.querySelectorAll<HTMLElement>(".tab-close").forEach((el) =>
-    el.addEventListener("click", (e) => {
-      e.stopPropagation();
-      closeTab(el.dataset.close!);
-    })
-  );
-  document.querySelectorAll<HTMLElement>(".tab-pin").forEach((el) =>
-    el.addEventListener("click", (e) => {
-      e.stopPropagation();
-      const tb = openTabs.find((x) => x.key === el.dataset.pin);
-      if (tb) {
-        tb.pinned = false;
-        render();
-      }
-    })
-  );
 }
-
 function terminalHtml(): string {
   return `<div class="term-wrap"><div class="term-host" id="termHost"></div></div>`;
+}
+
+// aggregate view: every live/exited terminal session across workspaces
+function agentsHtml(): string {
+  const rows = [...termSessions.values()]
+    .sort((a, b) => a.id - b.id)
+    .map((s) => {
+      const wsName = workspaces.find((w) => w.id === s.wsId)?.name ?? "?";
+      return `<div class="proj-item agent-row" data-term-open="${s.id}">
+        <span class="ico">&gt;_</span>
+        <span class="p">${esc(agentLabel(s.agentKey))}<span class="agent-ws"> · ${esc(wsName)}</span></span>
+        <span class="d" style="color:${s.exited ? "var(--text-faint)" : "var(--green)"};">${esc(t(s.exited ? "statusExited" : "statusRunning"))}</span>
+        <span class="tab-close" data-term-close="${s.id}" title="${esc(t("closeTab"))}">✕</span>
+      </div>`;
+    })
+    .join("");
+  return `
+    <div class="main-head"><h1>${esc(t("agentsTitle"))}</h1></div>
+    <div class="card">${rows || `<div class="proj-empty">${esc(t("noAgents"))}</div>`}</div>`;
+}
+
+function wireAgents() {
+  document.querySelectorAll("[data-term-open]").forEach((el) =>
+    el.addEventListener("click", (e) => {
+      if ((e.target as HTMLElement).closest("[data-term-close]")) return;
+      view = { kind: "terminal", id: (el as HTMLElement).dataset.termOpen! };
+      render();
+    })
+  );
+  document.querySelectorAll("[data-term-close]").forEach((el) =>
+    el.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const tid = Number((el as HTMLElement).dataset.termClose);
+      const s = termSessions.get(tid);
+      if (s) closeSubTabs(s.wsId, [tid]);
+    })
+  );
 }
 
 function wireTerminal(termId: number) {
@@ -651,19 +718,29 @@ function wireTerminal(termId: number) {
   if (sess.el.parentElement !== host) host.appendChild(sess.el);
   if (sess.term.element) sess.fit.fit();
 }
-
 function renderMain() {
   const main = $("main");
   let content: string;
   let wire: () => void = () => {};
+  let subFor: string | null = null; // workspace whose sub-tabs are shown
   if (view.kind === "create") {
     content = createFormHtml();
     wire = wireCreateForm;
   } else if (view.kind === "settings") {
     content = settingsHtml();
     wire = wireSettings;
+  } else if (view.kind === "agents") {
+    content = agentsHtml();
+    wire = wireAgents;
   } else if (view.kind === "terminal") {
     const termId = Number(view.id);
+    const sess = termSessions.get(termId);
+    if (!sess) {
+      view = fallbackView();
+      renderMain();
+      return;
+    }
+    subFor = sess.wsId;
     content = terminalHtml();
     wire = () => wireTerminal(termId);
   } else {
@@ -673,15 +750,16 @@ function renderMain() {
       renderMain();
       return;
     }
+    subFor = ws.id;
     content = workspaceDetailHtml(ws);
     wire = () => wireWorkspaceDetail(ws);
   }
   const flush = view.kind === "terminal";
-  main.innerHTML = `${tabbarHtml()}<div class="content-wrap${flush ? " content-flush" : ""}">${content}</div>`;
+  main.innerHTML = `${tabbarHtml()}${subFor ? subTabbarHtml(subFor) : ""}<div class="content-wrap${flush ? " content-flush" : ""}">${content}</div>`;
   wireTabbar();
+  if (subFor) wireSubTabbar(subFor);
   wire();
 }
-
 // ---------- settings page ----------
 function settingsHtml(): string {
   const fonts = ["Consolas", "Maple Mono NF CN", "Cascadia Code", "JetBrains Mono", "Microsoft YaHei"];
@@ -956,7 +1034,7 @@ function wireCreateForm() {
       const ws = await invoke<Workspace>("create_workspace", { name, description, agent, projects: [...pending] });
       setStatus(`${t("created")} "${ws.name}"`);
       await reload();
-      ensureTab("workspace", ws.id);
+      ensureTab(ws.id);
       view = { kind: "workspace", id: ws.id };
       render();
     } catch (err) { setStatus(`${t("createFailed")}：${err}`, true); }
@@ -1076,79 +1154,80 @@ function triggerWsDescEdit() {
 }
 
 // ---------- tabs ----------
-// VS Code model: opening a workspace opens its (unclosable) tab; every launch
-// opens a NEW terminal tab (multiple terminals per workspace). Terminal tabs
-// are keyed by session id; closing one kills its PTY. Pinned tabs survive
-// close-this/others/all.
-interface Tab { key: string; kind: "workspace" | "terminal"; wsId: string; termId?: number; pinned?: boolean; }
+// Two-level model: workspaces are top-level tabs (unclosable); every launch
+// opens a terminal SUB-tab under its workspace. Sub-tabs are not shared:
+// switching workspace hides (but keeps) the previous workspace's terminals.
+// A special "agents" top tab aggregates all live sessions across workspaces.
+interface Tab { key: string; wsId: string } // top level: workspaces only
 let openTabs: Tab[] = [];
 
-function tabToView(tb: Tab): View {
-  return tb.kind === "terminal" ? { kind: "terminal", id: String(tb.termId) } : { kind: "workspace", id: tb.wsId };
-}
-function ensureTab(kind: "workspace" | "terminal", wsId: string) {
-  const key = `${kind}:${wsId}`;
-  if (!openTabs.some((tb) => tb.key === key)) openTabs.push({ key, kind, wsId });
+function ensureTab(wsId: string) {
+  if (!openTabs.some((tb) => tb.wsId === wsId)) openTabs.push({ key: `ws:${wsId}`, wsId });
 }
 function fallbackView(): View {
-  if (openTabs.length) return tabToView(openTabs[openTabs.length - 1]);
+  if (openTabs.length) return { kind: "workspace", id: openTabs[openTabs.length - 1].wsId };
   return workspaces.length ? { kind: "workspace", id: workspaces[0].id } : { kind: "settings" };
 }
-function activeTabKey(): string | null {
-  if (view.kind === "workspace") return `ws:${(view as { id: string }).id}`;
-  if (view.kind === "terminal") return `term:${(view as { id: string }).id}`;
+// the workspace whose content is currently shown (for sidebar highlight)
+function activeWsId(): string | null {
+  if (view.kind === "workspace") return (view as { id: string }).id;
+  if (view.kind === "terminal") return termSessions.get(Number((view as { id: string }).id))?.wsId ?? null;
   return null;
 }
-function killTab(tb: Tab) {
-  if (tb.kind !== "terminal" || tb.termId === undefined) return;
-  const s = termSessions.get(tb.termId);
+
+// terminal sub-tab order per workspace; sessions hold the runtime state
+const termOrder = new Map<string, number[]>(); // wsId -> [termId]
+function orderOf(wsId: string): number[] {
+  let o = termOrder.get(wsId);
+  if (!o) {
+    o = [];
+    termOrder.set(wsId, o);
+  }
+  return o;
+}
+function killTerm(termId: number) {
+  const s = termSessions.get(termId);
   if (s) {
     invoke("term_kill", { id: s.id });
     s.term.dispose();
-    termSessions.delete(tb.termId);
+    termSessions.delete(termId);
   }
 }
-function closeTabs(keys: string[]) {
-  const closing = new Set(keys);
-  openTabs = openTabs.filter((tb) => {
-    if (!closing.has(tb.key)) return true;
-    killTab(tb);
+function closeSubTabs(wsId: string, termIds: number[]) {
+  const kill = new Set(termIds);
+  termOrder.set(wsId, orderOf(wsId).filter((id) => {
+    if (!kill.has(id)) return true;
+    killTerm(id);
     return false;
-  });
-  const active = activeTabKey();
-  if (active && closing.has(active)) view = fallbackView();
+  }));
+  if (view.kind === "terminal" && kill.has(Number((view as { id: string }).id))) {
+    const remaining = orderOf(wsId);
+    view = remaining.length ? { kind: "terminal", id: String(remaining[remaining.length - 1]) } : { kind: "workspace", id: wsId };
+  }
   render();
 }
-function closeTab(key: string) {
-  const tb = openTabs.find((x) => x.key === key);
-  if (!tb || tb.kind === "workspace" || tb.pinned) return; // workspace tabs and pinned tabs are unclosable
-  closeTabs([key]);
+function pinSubTab(wsId: string, termId: number) {
+  const s = termSessions.get(termId);
+  if (!s) return;
+  if (s.pinned) {
+    s.pinned = false; // unpin: stays in place
+  } else {
+    s.pinned = true; // pin: move to the front of this workspace's sub-tabs
+    const rest = orderOf(wsId).filter((id) => id !== termId);
+    let pos = 0;
+    while (pos < rest.length && termSessions.get(rest[pos])?.pinned) pos++;
+    rest.splice(pos, 0, termId);
+    termOrder.set(wsId, rest);
+  }
+  render();
 }
-// pinned tabs sort to the front (after workspace tabs and already-pinned ones)
-function pinTab(key: string) {
-  const i = openTabs.findIndex((tb) => tb.key === key);
-  if (i < 0) return;
-  const tb = openTabs[i];
-  tb.pinned = true;
-  openTabs.splice(i, 1);
-  let pos = 0;
-  while (pos < openTabs.length && (openTabs[pos].kind === "workspace" || openTabs[pos].pinned)) pos++;
-  openTabs.splice(pos, 0, tb);
-}
-function closeOtherTabs(keepKey: string) {
-  closeTabs(openTabs.filter((tb) => tb.kind === "terminal" && !tb.pinned && tb.key !== keepKey).map((tb) => tb.key));
-}
-function closeAllTabs() {
-  closeTabs(openTabs.filter((tb) => tb.kind === "terminal" && !tb.pinned).map((tb) => tb.key));
-}
-
 // ---------- embedded terminal (PROTOTYPE — experiment branch) ----------
-interface TermSession { term: Terminal; fit: FitAddon; el: HTMLElement; id: number; wsId: string; }
+interface TermSession { term: Terminal; fit: FitAddon; el: HTMLElement; id: number; wsId: string; agentKey: string; exited: boolean; pinned: boolean; }
 const termSessions = new Map<number, TermSession>(); // termId -> session
 let nextTermId = 1;
 
 async function openTerminal(ws: Workspace) {
-  // every launch spawns a NEW session/tab
+  // every launch spawns a NEW session/sub-tab
   const id = nextTermId++;
   const cs = getComputedStyle(document.documentElement);
   const cssVar = (n: string) => cs.getPropertyValue(n).trim() || undefined;
@@ -1178,7 +1257,7 @@ async function openTerminal(ws: Workspace) {
   term.loadAddon(fit);
   const el = document.createElement("div");
   el.className = "term-el";
-  const sess: TermSession = { term, fit, el, id, wsId: ws.id };
+  const sess: TermSession = { term, fit, el, id, wsId: ws.id, agentKey: ws.agent ?? settings.defaultAgent ?? "", exited: false, pinned: false };
   termSessions.set(id, sess);
   // console-style clipboard: Ctrl+C copies when there's a selection (otherwise
   // it's ^C), Ctrl+V pastes; right-click copies the selection or pastes
@@ -1214,9 +1293,12 @@ async function openTerminal(ws: Workspace) {
   }).observe(el);
   await listen<string>(`term-data-${id}`, (e) => term.write(e.payload));
   await listen(`term-exit-${id}`, () => {
+    sess.exited = true;
     term.write("\r\n\x1b[90m[process exited]\x1b[0m\r\n"); // tab stays until closed
+    render(); // refresh tab labels / agents count
   });
-  openTabs.push({ key: `term:${id}`, kind: "terminal", wsId: ws.id, termId: id });
+  ensureTab(ws.id);
+  orderOf(ws.id).push(id);
   view = { kind: "terminal", id: String(id) };
   render(); // renderMain attaches the terminal DOM
   sess.term.open(sess.el);
@@ -1230,7 +1312,6 @@ async function openTerminal(ws: Workspace) {
     setStatus(`${t("launchFailed")}：${err}`, true);
   }
 }
-
 // workspace actions usable from sidebar context menu
 // launch mode: embedded terminal tab (default) | cmd window | powershell window
 async function launchWs(ws: Workspace) {
@@ -1259,16 +1340,14 @@ async function deleteWs(ws: Workspace) {
   const ok = await modal({ title: ws.name, body: t("confirmDelete"), okLabel: t("delete"), danger: true });
   if (ok === null) return;
   await invoke("delete_workspace", { id: ws.id });
-  // close all its tabs and kill any live terminals
-  openTabs = openTabs.filter((tb) => {
-    if (tb.wsId !== ws.id) return true;
-    killTab(tb);
-    return false;
-  });
+  // close its top tab and kill all its terminal sessions
+  openTabs = openTabs.filter((tb) => tb.wsId !== ws.id);
+  (termOrder.get(ws.id) ?? []).forEach(killTerm);
+  termOrder.delete(ws.id);
   setStatus(t("deleted"));
   await reload();
-  const active = activeTabKey();
-  if (active && !openTabs.some((tb) => tb.key === active)) {
+  if ((view.kind === "workspace" && (view as { id: string }).id === ws.id) ||
+      (view.kind === "terminal" && !termSessions.has(Number((view as { id: string }).id)))) {
     view = fallbackView();
   }
   render();
@@ -1718,7 +1797,7 @@ document.addEventListener("keydown", async (e) => {
   wireSplitter();
   getVersion().then((v) => (appVersion = v));
   if (workspaces.length) {
-    ensureTab("workspace", workspaces[0].id);
+    ensureTab(workspaces[0].id);
     view = { kind: "workspace", id: workspaces[0].id };
   } else {
     view = { kind: "settings" };
