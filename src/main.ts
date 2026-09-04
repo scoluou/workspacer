@@ -327,6 +327,8 @@ let workspaces: Workspace[] = [];
 let view: View = { kind: "settings" };
 // where the settings page's back button returns to; null = nowhere to go back
 let settingsReturn: View | null = null;
+// where the agents tab toggles back to; null = not in the agents view
+let agentsReturn: View | null = null;
 
 const $ = (id: string) => document.getElementById(id)!;
 const esc = (s: string) =>
@@ -669,7 +671,14 @@ function wireTabbar() {
     el.addEventListener("click", () => {
       if (Date.now() < suppressClickUntil) return; // trailing click after a drag
       if (key === "agents") {
-        view = { kind: "agents" };
+        // toggle: clicking again returns to wherever we were
+        if (view.kind === "agents") {
+          view = agentsReturn ?? fallbackView();
+          agentsReturn = null;
+        } else {
+          agentsReturn = view;
+          view = { kind: "agents" };
+        }
       } else {
         view = { kind: "workspace", id: key.slice(3) };
       }
