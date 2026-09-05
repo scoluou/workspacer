@@ -174,6 +174,9 @@ const DICT: Record<string, Record<string, string>> = {
     statusPending: "待恢复",
     convTitle: "对话记录",
     convEmpty: "还没有对话",
+    chipLabelHint: "仅当前会话的标签；留空恢复自动命名",
+    agentRenamed: "显示名已更新为",
+    agentLabelReset: "已恢复自动命名",
   },
   en: {
     workspaces: "Work Spaces",
@@ -311,6 +314,9 @@ const DICT: Record<string, Record<string, string>> = {
     workspaceTab: "Workspace",
     convTitle: "Conversation",
     convEmpty: "No messages yet",
+    chipLabelHint: "This session's label only; leave empty to auto-name",
+    agentRenamed: "Display name updated to",
+    agentLabelReset: "Auto-naming restored",
   },
 };
 
@@ -631,15 +637,12 @@ function subTabbarHtml(wsId: string): string {
   const ids = orderOf(wsId);
   const activeId = view.kind === "terminal" ? Number((view as { id: string }).id) : null;
   const projActive = view.kind === "workspace" && (view as { id: string }).id === wsId;
-  const seen = new Map<string, number>();
   const projTab = `<div class="tab subtab-proj${projActive ? " active" : ""}" data-subproj="${wsId}"><span class="tab-label">🗂️ ${esc(t("workspaceTab"))}</span></div>`;
   const terms = ids
     .map((tid) => {
       const s = termSessions.get(tid);
       if (!s) return "";
-      const n = (seen.get(s.agentKey) ?? 0) + 1;
-      seen.set(s.agentKey, n);
-      const label = `&gt;_ ${esc(agentLabel(s.agentKey))}${n > 1 ? ` ${n}` : ""}${s.exited ? ` (${esc(t("statusExited"))})` : ""}`;
+      const label = `&gt;_ ${esc(s.sessionLabel)}${s.exited ? ` (${esc(t("statusExited"))})` : ""}`;
       const tail = s.pinned
         ? `<span class="tab-close tab-pin" data-subpin="${tid}" title="${esc(t("unpin"))}">📌</span>`
         : `<span class="tab-close" data-subclose="${tid}" title="${esc(t("closeTab"))}">✕</span>`;
@@ -680,6 +683,7 @@ function wireSubTabbar(wsId: string) {
       if (!s) return;
       showCtxMenu(e.clientX, e.clientY, [
         { label: t(s.pinned ? "unpin" : "pin"), onClick: () => pinSubTab(wsId, tid) },
+        { label: t("rename"), onClick: () => renameSessionLabel(s) },
         ...(!s.pinned ? [{ label: t("closeThis"), onClick: () => closeSubTabs(wsId, [tid]) }] : []),
         { label: t("closeOthers"), onClick: () => closeSubTabs(wsId, orderOf(wsId).filter((id) => id !== tid && !termSessions.get(id)?.pinned)) },
         { label: t("closeAll"), onClick: () => closeSubTabs(wsId, orderOf(wsId).filter((id) => !termSessions.get(id)?.pinned)) },
@@ -780,7 +784,7 @@ function agentsHtml(): string {
       const wsName = workspaces.find((w) => w.id === s.wsId)?.name ?? "?";
       return `<div class="proj-item agent-row" data-term-open="${s.id}">
         <span class="ico">&gt;_</span>
-        <span class="p">${esc(agentLabel(s.agentKey))}<span class="agent-ws"> · ${esc(wsName)}</span></span>
+        <span class="p">${esc(s.sessionLabel)}<span class="agent-ws"> · ${esc(wsName)}</span></span>
         <span class="d" style="color:${!s.spawned || s.exited ? "var(--text-faint)" : "var(--green)"};">${esc(t(!s.spawned ? "statusPending" : s.exited ? "statusExited" : "statusRunning"))}</span>
         <span class="tab-close" data-term-close="${s.id}" title="${esc(t("closeTab"))}">✕</span>
       </div>`;
@@ -1618,6 +1622,32 @@ async function launchWs(ws: Workspace) {
     setStatus(`${t("launched")}：${r}`);
   } catch (err) { setStatus(`${t("launchFailed")}：${err}`, true); }
 }
+/// The label a session would get without a custom one: "<agent> <n>" where n
+/// is this session's position among same-agent sessions of its workspace —
+/// must match the sub-tab chip numbering.
+function autoSessionLabel(s: TermSession): string {
+  const seen = new Map<string, number>();
+  for (const id of orderOf(s.wsId)) {
+    const t = termSessions.get(id);
+    if (!t) continue;
+    const n = (seen.get(t.agentKey) ?? 0) + 1;
+    seen.set(t.agentKey, n);
+    if (id === s.id) return `${agentLabel(t.agentKey)}${n > 1 ? ` ${n}` : ""}`;
+  }
+  return agentLabel(s.agentKey);
+}
+
+// rename a terminal sub-tab's label (per session, not global); the custom
+// name also becomes the session marker agents see in their resume pickers.
+// Empty input → back to auto naming. Persisted via persistUi → ui-state.json.
+async function renameSessionLabel(s: TermSession) {
+  const val = await modal({ title: t("rename"), body: t("chipLabelHint"), input: s.sessionLabel, okLabel: t("rename") });
+  if (val === null || val === s.sessionLabel) return;
+  s.sessionLabel = val || autoSessionLabel(s);
+  setStatus(val ? `${t("agentRenamed")} “${val}”` : t("agentLabelReset"));
+  render();
+}
+
 async function renameWs(ws: Workspace) {
   const trimmed = await modal({ title: t("rename"), input: ws.name, okLabel: t("rename") });
   if (trimmed === null) return;
