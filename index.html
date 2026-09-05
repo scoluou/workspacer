@@ -301,6 +301,7 @@
     /* context menu */
     .ctx-menu {
       position: fixed; z-index: 1000; min-width: 160px;
+      max-width: min(560px, calc(100vw - 32px)); max-height: 70vh; overflow-y: auto;
       background: var(--bg-raised); border: 1px solid var(--border-strong, #3a3e45);
       border-radius: 8px; padding: 4px; box-shadow: 0 8px 24px rgba(0,0,0,0.45);
     }

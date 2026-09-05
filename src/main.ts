@@ -174,6 +174,8 @@ const DICT: Record<string, Record<string, string>> = {
     statusPending: "待恢复",
     convTitle: "对话记录",
     convEmpty: "还没有对话",
+    switchSession: "切换会话…",
+    noSessions: "没有可切换的会话",
     chipLabelHint: "仅当前会话的标签；留空恢复自动命名",
     agentRenamed: "显示名已更新为",
     agentLabelReset: "已恢复自动命名",
@@ -314,6 +316,8 @@ const DICT: Record<string, Record<string, string>> = {
     workspaceTab: "Workspace",
     convTitle: "Conversation",
     convEmpty: "No messages yet",
+    switchSession: "Switch session…",
+    noSessions: "No sessions to switch to",
     chipLabelHint: "This session's label only; leave empty to auto-name",
     agentRenamed: "Display name updated to",
     agentLabelReset: "Auto-naming restored",
@@ -682,6 +686,7 @@ function wireSubTabbar(wsId: string) {
       const s = termSessions.get(tid);
       if (!s) return;
       showCtxMenu(e.clientX, e.clientY, [
+        ...(["agent", "opencode", "codex"].includes(s.agentKey) ? [{ label: t("switchSession"), onClick: () => switchSessionPicker(s) }] : []),
         { label: t(s.pinned ? "unpin" : "pin"), onClick: () => pinSubTab(wsId, tid) },
         { label: t("rename"), onClick: () => renameSessionLabel(s) },
         ...(!s.pinned ? [{ label: t("closeThis"), onClick: () => closeSubTabs(wsId, [tid]) }] : []),
@@ -1359,6 +1364,40 @@ function killTerm(termId: number) {
     termSessions.delete(termId);
   }
 }
+
+// workspacer-owned session switcher: the TUI's own session picker is invisible
+// to us (arrow keys + Enter, no typed argument), so switching goes through us
+// and we always know the terminal's session ? restart restores it exactly
+async function switchSessionPicker(sess: TermSession) {
+  const sessions = await invoke<{ id: string; title: string; updated: number }[]>("list_agent_sessions", { agent: sess.agentKey, workspaceId: sess.wsId });
+  if (!sessions.length) {
+    setStatus(t("noSessions"), true);
+    return;
+  }
+  showCtxMenu(
+    Math.round(innerWidth / 2),
+    100,
+    sessions.map((s) => ({
+      label: `${s.title || s.id} ? ${new Date(s.updated).toLocaleString()}`,
+      onClick: () => switchTerminalSession(sess, s.id),
+    }))
+  );
+}
+
+async function switchTerminalSession(sess: TermSession, sessionId: string) {
+  sess.sessionId = sessionId;
+  sess.resume = true;
+  sess.restarting = true; // swallow the exit event from the kill below
+  sess.entries = [];
+  renderConvBar(sess);
+  await invoke("term_kill", { id: sess.id }); // kill the PTY child, keep the view
+  sess.spawned = false;
+  sess.exited = false;
+  sess.term.reset();
+  persistUi();
+  await startTerminal(sess);
+  sess.restarting = false;
+}
 function closeSubTabs(wsId: string, termIds: number[]) {
   const kill = new Set(termIds);
   termOrder.set(wsId, orderOf(wsId).filter((id) => {
@@ -1462,6 +1501,7 @@ interface TermSession {
   entries: { text: string; line: number; time: number }[]; // submitted prompts
   inputBuf: string; // line currently being typed (conversation capture)
   imeDetach?: () => void;
+  restarting?: boolean; // session switch in progress: swallow the exit event
 }
 const termSessions = new Map<number, TermSession>(); // termId -> session
 let nextTermId = 1;
@@ -1556,6 +1596,7 @@ async function openTerminal(ws: Workspace, opts: { activate?: boolean; sessionId
   }).observe(el);
   await listen<string>(`term-data-${id}`, (e) => term.write(e.payload));
   await listen(`term-exit-${id}`, () => {
+    if (sess.restarting) return; // session switch: the PTY is being replaced
     sess.exited = true;
     // unread if the user isn't looking at this terminal right now
     sess.unread = !(view.kind === "terminal" && Number((view as { id: string }).id) === id);
@@ -1583,14 +1624,23 @@ async function openTerminal(ws: Workspace, opts: { activate?: boolean; sessionId
 async function startTerminal(sess: TermSession) {
   if (sess.spawned) return;
   sess.spawned = true;
-  sess.term.open(sess.el);
+  if (!sess.term.element) sess.term.open(sess.el); // already open on session switch
   // pin the IME candidate window to the TUI's visual caret (inverse-video
   // cell), not the hardware cursor parked at the end of output
-  sess.imeDetach = attachImeHeuristic(sess.term).detach;
+  if (!sess.imeDetach) sess.imeDetach = attachImeHeuristic(sess.term).detach;
   sess.fit.fit();
   sess.term.focus();
   setStatus(t("launching"));
   try {
+    // fresh launch: the backend binds the newly created session to this
+    // terminal (agents without assignable ids would otherwise be anonymous)
+    if (!sess.resume && ["agent", "opencode", "codex"].includes(sess.agentKey)) {
+      const un = await listen<string>(`term-bind-${sess.id}`, (e) => {
+        sess.sessionId = e.payload;
+        persistUi();
+        un();
+      });
+    }
     // spawn at the terminal's real size so the agent draws one correct frame
     const info = await invoke<{ prog: string; initial_prompt: string | null }>("launch_agent_embedded", {
       workspaceId: sess.wsId, agentOverride: sess.agentKey || null, termId: sess.id,
