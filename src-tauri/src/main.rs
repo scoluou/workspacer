@@ -425,6 +425,17 @@ struct PtySession {
 
 type PtyMap = Mutex<std::collections::HashMap<u32, PtySession>>;
 
+/// Whether the PTY child is still alive: the frontend can't see the process
+/// directly, and an open tab is "running" exactly as long as its child is.
+#[tauri::command]
+fn term_alive(sessions: tauri::State<PtyMap>, id: u32) -> bool {
+    let mut map = sessions.lock().unwrap();
+    match map.get_mut(&id) {
+        Some(s) => matches!(s.child.try_wait(), Ok(None)),
+        None => false, // never spawned, or killed
+    }
+}
+
 /// Split our pre-quoted arg string into argv (quotes only wrap, never embedded —
 /// cmd_safe guarantees that for context, and paths can't contain `"`).
 /// PROTOTYPE: exists because build_agent predates the PTY path.
@@ -1320,7 +1331,8 @@ fn main() {
             launch_agent_ps,
             term_write,
             term_resize,
-            term_kill
+            term_kill,
+            term_alive
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

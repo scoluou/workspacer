@@ -522,11 +522,6 @@ function wireDragReorder(els: HTMLElement[], onMove: (from: number, to: number) 
 
 // ---------- sidebar ----------
 function renderNav() {
-  // viewing a terminal marks it read (single place: renderNav runs first in render)
-  if (view.kind === "terminal") {
-    const s = termSessions.get(Number((view as { id: string }).id));
-    if (s) s.unread = false;
-  }
   // static labels
   $("sidebarSection").textContent = t("workspaces");
   $("settingsLabel").textContent = t("settings");
@@ -540,12 +535,10 @@ function renderNav() {
   workspaces.forEach((ws) => {
     const item = document.createElement("div");
     item.className = "ws-nav-item" + (active === ws.id ? " active" : "");
-    // status dot: yellow = an exited-but-unread agent (needs attention),
-    // green = an agent is running
+    // green dot while any of the workspace's agent processes is alive
     const sessions = orderOf(ws.id).map((id) => termSessions.get(id)).filter((s) => s !== undefined);
-    const hasUnread = sessions.some((s) => s.exited && s.unread);
-    const hasRunning = sessions.some((s) => !s.exited);
-    const dot = hasUnread ? `<span class="ws-dot unread"></span>` : hasRunning ? `<span class="ws-dot running"></span>` : "";
+    const hasRunning = sessions.some((s) => s.spawned);
+    const dot = hasRunning ? `<span class="ws-dot running"></span>` : "";
     item.innerHTML = `${dot}<span style="overflow:hidden;text-overflow:ellipsis;">${esc(ws.name)}</span><button class="ws-launch" title="${esc(t("launch"))}">▶</button>`;
     item.querySelector(".ws-launch")!.addEventListener("click", (e) => {
       e.stopPropagation(); // launch, not navigate
@@ -624,7 +617,7 @@ function tabbarHtml(): string {
         : view.kind === "agents"
           ? "agents"
           : null;
-  const running = [...termSessions.values()].filter((s) => !s.exited).length;
+  const running = [...termSessions.values()].filter((s) => s.spawned).length;
   const tabs = openTabs
     .map((tb) => {
       const name = workspaces.find((w) => w.id === tb.wsId)?.name ?? "?";
@@ -646,11 +639,13 @@ function subTabbarHtml(wsId: string): string {
     .map((tid) => {
       const s = termSessions.get(tid);
       if (!s) return "";
-      const label = `&gt;_ ${esc(s.sessionLabel)}${s.exited ? ` (${esc(t("statusExited"))})` : ""}`;
+      // a tab is exited only once its process is really gone; an open tab that
+      // hasn't spawned yet is pending, not exited
+      const label = `&gt;_ ${esc(s.sessionLabel)}${s.spawned ? "" : ` (${esc(t("statusPending"))})`}`;
       const tail = s.pinned
         ? `<span class="tab-close tab-pin" data-subpin="${tid}" title="${esc(t("unpin"))}">📌</span>`
         : `<span class="tab-close" data-subclose="${tid}" title="${esc(t("closeTab"))}">✕</span>`;
-      return `<div class="tab${tid === activeId ? " active" : ""}${s.exited ? " exited" : ""}" data-subtab="${tid}"><span class="tab-label">${label}</span>${tail}</div>`;
+      return `<div class="tab${tid === activeId ? " active" : ""}${s.spawned ? "" : " exited"}" data-subtab="${tid}"><span class="tab-label">${label}</span>${tail}</div>`;
     })
     .join("");
   return `<div class="tabbar subtabbar">${projTab}${terms}</div>`;
@@ -709,14 +704,12 @@ function wireSubTabbar(wsId: string) {
   );
 }
 
-// open a workspace: an exited-but-unread agent first, then the most recently
-// used one, else the project page
+// open a workspace: the most recently used agent tab, else the project page
 function openWorkspace(wsId: string) {
   ensureTab(wsId);
   const order = orderOf(wsId);
-  const unread = order.map((id) => termSessions.get(id)).find((s) => s && s.exited && s.unread);
   const last = lastTermByWs.get(wsId) ?? (order.length ? order[order.length - 1] : undefined);
-  const target = unread?.id ?? last;
+  const target = last;
   view = target !== undefined && termSessions.has(target) ? { kind: "terminal", id: String(target) } : { kind: "workspace", id: wsId };
   render();
 }
@@ -790,7 +783,7 @@ function agentsHtml(): string {
       return `<div class="proj-item agent-row" data-term-open="${s.id}">
         <span class="ico">&gt;_</span>
         <span class="p">${esc(s.sessionLabel)}<span class="agent-ws"> · ${esc(wsName)}</span></span>
-        <span class="d" style="color:${!s.spawned || s.exited ? "var(--text-faint)" : "var(--green)"};">${esc(t(!s.spawned ? "statusPending" : s.exited ? "statusExited" : "statusRunning"))}</span>
+        <span class="d" style="color:${s.spawned ? "var(--green)" : "var(--text-faint)"};">${esc(t(s.spawned ? "statusRunning" : "statusPending"))}</span>
         <span class="tab-close" data-term-close="${s.id}" title="${esc(t("closeTab"))}">✕</span>
       </div>`;
     })
@@ -1392,7 +1385,6 @@ async function switchTerminalSession(sess: TermSession, sessionId: string) {
   renderConvBar(sess);
   await invoke("term_kill", { id: sess.id }); // kill the PTY child, keep the view
   sess.spawned = false;
-  sess.exited = false;
   sess.term.reset();
   persistUi();
   await startTerminal(sess);
@@ -1496,12 +1488,21 @@ function termTheme() {
 interface TermSession {
   term: Terminal; fit: FitAddon; el: HTMLElement; id: number; wsId: string;
   agentKey: string; sessionId: string; sessionLabel: string; resume: boolean;
-  exited: boolean; pinned: boolean; spawned: boolean;
-  unread: boolean; // exited while not being viewed ? yellow dot on the sidebar
+  pinned: boolean; spawned: boolean;
   entries: { text: string; line: number; time: number }[]; // submitted prompts
   inputBuf: string; // line currently being typed (conversation capture)
   imeDetach?: () => void;
   restarting?: boolean; // session switch in progress: swallow the exit event
+}
+// a tab's liveness is derived, not stored: it is "running" as long as its PTY
+// child is alive (term_alive), and "exited" only once the child is really gone.
+// the tab itself stays until the user closes it. The UI reads it via spawned +
+// the exit event (both render triggers), and term_alive is there for any point
+// that needs the process truth directly.
+async function isAlive(sess: TermSession): Promise<boolean> {
+  if (!sess.spawned) return false;
+  try { return await invoke<boolean>("term_alive", { id: sess.id }); }
+  catch { return false; }
 }
 const termSessions = new Map<number, TermSession>(); // termId -> session
 let nextTermId = 1;
@@ -1533,12 +1534,10 @@ async function openTerminal(ws: Workspace, opts: { activate?: boolean; sessionId
     sessionId: opts.sessionId ?? crypto.randomUUID(),
     sessionLabel,
     resume: opts.resume ?? false,
-    exited: false,
     pinned: opts.pinned ?? false,
     spawned: false,
     entries: [...(opts.entries ?? [])],
     inputBuf: "",
-    unread: false,
   };
   termSessions.set(id, sess);
   // console-style clipboard: Ctrl+C copies when there's a selection (otherwise
@@ -1621,11 +1620,8 @@ async function openTerminal(ws: Workspace, opts: { activate?: boolean; sessionId
   await listen<string>(`term-data-${id}`, (e) => term.write(e.payload));
   await listen(`term-exit-${id}`, () => {
     if (sess.restarting) return; // session switch: the PTY is being replaced
-    sess.exited = true;
-    // unread if the user isn't looking at this terminal right now
-    sess.unread = !(view.kind === "terminal" && Number((view as { id: string }).id) === id);
     term.write("\r\n\x1b[90m[process exited]\x1b[0m\r\n"); // tab stays until closed
-    render(); // refresh tab labels / agents count / sidebar dots
+    render(); // liveness is derived, so this just refreshes labels / dots
   });
   ensureTab(ws.id);
   const order = orderOf(ws.id);
@@ -1677,8 +1673,11 @@ async function startTerminal(sess: TermSession) {
       renderConvBar(sess);
     }
     setStatus("");
+    render(); // spawned flipped, so the tab's pending mark and status clear
   } catch (err) {
-    setStatus(`${t("launchFailed")}：${err}`, true);
+    sess.spawned = false; // launch failed: the tab goes back to pending, not stuck
+    setStatus(`${t("launchFailed")}:${err}`, true);
+    render();
   }
 }
 // workspace actions usable from sidebar context menu
