@@ -1508,6 +1508,9 @@ async function openTerminal(ws: Workspace, opts: { activate?: boolean; sessionId
       return false;
     }
     if (e.ctrlKey && key === "v") {
+      // preventDefault stops the browser paste event ? xterm's own paste
+      // handler never fires, otherwise the text lands twice
+      e.preventDefault();
       navigator.clipboard.readText().then((t2) => t2 && invoke("term_write", { id, data: t2 }));
       return false;
     }
