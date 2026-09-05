@@ -703,15 +703,16 @@ struct OcSession {
     updated: i64,
 }
 
-/// Parse `opencode session list --format json` output for `cwd`, most recent
-/// first. Pure (testable); the subprocess part is below.
-fn parse_opencode_sessions(json: &str, cwd: &str) -> Vec<OcSession> {
+/// Parse `opencode session list --format json` output, most recent first.
+/// Pure (testable). No directory filtering here: the CLI itself scopes the
+/// list to the project of the subprocess's cwd (git-root aware), which is
+/// exactly what the TUI's own session picker shows.
+fn parse_opencode_sessions(json: &str) -> Vec<OcSession> {
     let mut v: Vec<OcSession> = serde_json::from_str::<serde_json::Value>(json)
         .ok()
         .and_then(|v| v.as_array().cloned())
         .unwrap_or_default()
         .iter()
-        .filter(|s| s.get("directory").and_then(|d| d.as_str()).is_some_and(|d| norm_path(d) == norm_path(cwd)))
         .filter_map(|s| {
             Some(OcSession {
                 id: s.get("id")?.as_str()?.to_string(),
@@ -737,7 +738,7 @@ fn opencode_sessions(cwd: &str) -> Vec<OcSession> {
         .creation_flags(CREATE_NO_WINDOW)
         .output();
     match out {
-        Ok(o) => parse_opencode_sessions(&String::from_utf8_lossy(&o.stdout), cwd),
+        Ok(o) => parse_opencode_sessions(&String::from_utf8_lossy(&o.stdout)),
         Err(_) => Vec::new(),
     }
 }
@@ -1402,14 +1403,12 @@ mod tests {
             {"id":"ses_new","title":"new one","updated":200,"directory":"E:\\workspacer"},
             {"id":"ses_other","title":"other dir","updated":300,"directory":"E:\\other"}
         ]"#;
-        // sorted most-recent-first; other dirs ignored; slash/case-insensitive
-        let v = parse_opencode_sessions(json, "E:/workspacer");
+        // sorted most-recent-first (scoping is the CLI's job, via its cwd)
+        let v = parse_opencode_sessions(json);
         let ids: Vec<&str> = v.iter().map(|s| s.id.as_str()).collect();
-        assert_eq!(ids, ["ses_new", "ses_old"]);
-        assert_eq!(v[0].title, "new one");
-        assert_eq!(parse_opencode_sessions(json, "e:\\WORKSPACER").len(), 2);
-        assert!(parse_opencode_sessions(json, "E:\\nowhere").is_empty());
-        assert!(parse_opencode_sessions("not json", "E:\\workspacer").is_empty());
+        assert_eq!(ids, ["ses_other", "ses_new", "ses_old"]);
+        assert_eq!(v[1].title, "new one");
+        assert!(parse_opencode_sessions("not json").is_empty());
     }
 
     #[test]
