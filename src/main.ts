@@ -1542,7 +1542,31 @@ async function openTerminal(ws: Workspace, opts: { activate?: boolean; sessionId
   };
   termSessions.set(id, sess);
   // console-style clipboard: Ctrl+C copies when there's a selection (otherwise
-  // it's ^C), Ctrl+V pastes; right-click copies the selection or pastes
+  // it's ^C), Ctrl+V pastes; right-click copies the selection or pastes.
+  // Clipboard images are saved to a temp file and the agent gets the path
+  // (claude/codex/cursor all read images by path).
+  const pasteIntoTerminal = async () => {
+    try {
+      for (const item of await navigator.clipboard.read()) {
+        const imgType = item.types.find((ty) => ty.startsWith("image/"));
+        if (imgType) {
+          const blob = await item.getType(imgType);
+          const dataUrl = await new Promise<string>((res) => {
+            const r = new FileReader();
+            r.onload = () => res(r.result as string);
+            r.readAsDataURL(blob);
+          });
+          const path = await invoke<string>("save_clipboard_image", { b64: dataUrl.split(",")[1], ext: imgType.split("/")[1] });
+          invoke("term_write", { id, data: /\s/.test(path) ? `"${path}"` : path });
+          return;
+        }
+      }
+    } catch {
+      // clipboard.read() denied or text-only ? fall through to readText
+    }
+    const text = await navigator.clipboard.readText().catch(() => "");
+    if (text) invoke("term_write", { id, data: text });
+  };
   term.attachCustomKeyEventHandler((e) => {
     if (e.type !== "keydown") return true;
     const key = e.key.toLowerCase();
@@ -1555,7 +1579,7 @@ async function openTerminal(ws: Workspace, opts: { activate?: boolean; sessionId
       // preventDefault stops the browser paste event ? xterm's own paste
       // handler never fires, otherwise the text lands twice
       e.preventDefault();
-      navigator.clipboard.readText().then((t2) => t2 && invoke("term_write", { id, data: t2 }));
+      pasteIntoTerminal();
       return false;
     }
     return true;
@@ -1567,7 +1591,7 @@ async function openTerminal(ws: Workspace, opts: { activate?: boolean; sessionId
       navigator.clipboard.writeText(term.getSelection());
       term.clearSelection();
     } else {
-      navigator.clipboard.readText().then((t2) => t2 && invoke("term_write", { id, data: t2 }));
+      pasteIntoTerminal();
     }
   });
   term.onData((d) => {

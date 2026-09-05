@@ -865,6 +865,20 @@ fn find_new_session_id(agent: &str, cwd: &str, before: &std::collections::HashSe
     new.pop()
 }
 
+/// Save a clipboard image to a temp file and return its path — agents receive
+/// images as file paths (claude/codex/cursor all read them that way).
+#[tauri::command]
+fn save_clipboard_image(b64: &str, ext: &str) -> Result<String, String> {
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::STANDARD.decode(b64).map_err(|e| e.to_string())?;
+    // ext comes from the clipboard MIME type; keep it a plain file extension
+    let ext = if !ext.is_empty() && ext.chars().all(|c| c.is_ascii_alphanumeric()) { ext } else { "png" };
+    let millis = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
+    let path = std::env::temp_dir().join(format!("workspacer-paste-{millis}.{ext}"));
+    fs::write(&path, &bytes).map_err(|e| e.to_string())?;
+    Ok(path.to_string_lossy().into_owned())
+}
+
 /// a session entry for the switcher UI
 #[derive(Serialize)]
 struct SessionChoice {
@@ -1300,6 +1314,7 @@ fn main() {
             save_settings,
             list_agents,
             list_agent_sessions,
+            save_clipboard_image,
             launch_agent,
             launch_agent_embedded,
             launch_agent_ps,

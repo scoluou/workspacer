@@ -5130,6 +5130,7 @@ checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
 name = "workspacer"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "dirs 5.0.1",
  "md5",
  "portable-pty",
