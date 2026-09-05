@@ -6,16 +6,19 @@
   <title>workspacer</title>
   <style>
     :root {
-      --bg: #1b1d21;
-      --bg-sidebar: #16181b;
-      --bg-raised: #212428;
-      --bg-hover: #26292e;
-      --bg-active: #2b2f35;
-      --border: #2c2f34;
-      --border-subtle: #26282c;
-      --text: #d4d6da;
-      --text-dim: #8a8f98;
-      --text-faint: #5c6169;
+      /* Cursor-dark aligned neutrals: the embedded terminal's bg is painted
+         by the agent TUI / ConPTY (#141414), so the app chrome uses the same
+         neutral ramp to stay seamless with it */
+      --bg: #141414;
+      --bg-sidebar: #181818;
+      --bg-raised: #1f1f1f;
+      --bg-hover: #262626;
+      --bg-active: #2b2b2b;
+      --border: #2b2b2b;
+      --border-subtle: #242424;
+      --text: #cccccc;
+      --text-dim: #9d9d9d;
+      --text-faint: #6a6a6a;
       --accent: #4f8cff;
       --accent-dim: rgba(79, 140, 255, 0.14);
       --danger: #e5534b;
