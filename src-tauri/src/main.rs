@@ -240,14 +240,31 @@ fn build_agent(agent: &str, ws: &Workspace, session_id: &str, resume: bool, labe
 
     if resume {
         // resume an earlier session; context is NOT re-injected (the session
-        // already has it). claude/pi resume by our assigned id; codex/opencode/
-        // cursor only support "latest session" — best effort.
+        // already has it). claude/pi/cursor resume by id (re-resolved on save);
+        // opencode/codex resolve the dir's most-recent session at launch time.
         let args = match agent {
             "claude" => format!("--resume {}{}", quote(session_id), add_dirs),
             "pi" => format!("--session-id {}", quote(session_id)),
-            "codex" => format!("-C {} resume --last", quote(&primary)),
-            "opencode" => format!("{} --continue", quote(&primary)),
-            "agent" => format!("--trust --workspace {}{} --continue", quote(&primary), add_dirs),
+            "codex" => match codex_latest_session(&primary) {
+                Some(id) => format!("-C {} resume {}", quote(&primary), quote(&id)),
+                None => format!("-C {} resume --last", quote(&primary)),
+            },
+            "opencode" => match opencode_latest_session(&primary) {
+                Some(id) => format!("{} --session {}", quote(&primary), quote(&id)),
+                None => format!("{} --continue", quote(&primary)),
+            },
+            "agent" => {
+                // deterministic resume when the chat exists on disk; the id may
+                // be a never-persisted placeholder → fall back to --continue
+                let chat = dirs::home_dir().unwrap_or_default().join(".cursor").join("chats")
+                    .join(cursor_chat_dir_name(&primary)).join(session_id);
+                let mode = if !session_id.is_empty() && chat.is_dir() {
+                    format!("--resume {}", quote(session_id))
+                } else {
+                    "--continue".into()
+                };
+                format!("--trust --workspace {}{} {}", quote(&primary), add_dirs, mode)
+            }
             other => return Err(format!("unknown agent: {other}")),
         };
         return Ok(LaunchSpec { prog: agent.into(), args: args.trim().to_string(), cwd: primary, initial_prompt: None });
@@ -630,25 +647,115 @@ fn claude_project_dir_name(cwd: &str) -> String {
 fn pi_session_dir_name(cwd: &str) -> String {
     format!("--{}--", cwd.trim_start_matches(['/', '\\']).replace(['/', '\\', ':'], "-"))
 }
+/// cursor stores chats at ~/.cursor/chats/<md5 of backslash-normalized cwd>/<chatId>/
+fn cursor_chat_dir_name(cwd: &str) -> String {
+    format!("{:x}", md5::compute(cwd.replace('/', "\\").as_bytes()))
+}
 
-/// Re-resolve the live session id for claude/pi terminals: the user may have
-/// /resume-switched inside the agent, and the newest session file by mtime is
+/// path comparison on Windows: unify slashes and case
+fn norm_path(s: &str) -> String {
+    s.replace('/', "\\").to_lowercase()
+}
+
+/// Pick the most recently updated session for `cwd` from `opencode session
+/// list --format json` output. Pure (testable); the subprocess part is below.
+fn pick_latest_session(json: &str, cwd: &str) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(json)
+        .ok()?
+        .as_array()?
+        .iter()
+        .filter(|s| s.get("directory").and_then(|d| d.as_str()).is_some_and(|d| norm_path(d) == norm_path(cwd)))
+        .max_by_key(|s| s.get("updated").and_then(|u| u.as_i64()).unwrap_or(0))
+        .and_then(|s| s.get("id").and_then(|i| i.as_str()).map(str::to_string))
+}
+
+/// opencode's --continue doesn't follow in-TUI session switches, so ask the
+/// CLI for the most recently active session of this directory at launch time.
+fn opencode_latest_session(cwd: &str) -> Option<String> {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    // via cmd so the .cmd shim resolves (CreateProcess alone only finds .exe)
+    let out = std::process::Command::new("cmd.exe")
+        .args(["/c", "opencode", "session", "list", "--format", "json"])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .ok()?;
+    pick_latest_session(&String::from_utf8_lossy(&out.stdout), cwd)
+}
+
+/// Parse a codex rollout file's first line into (session_id, cwd).
+/// Pure (testable).
+fn codex_rollout_meta(first_line: &str) -> Option<(String, String)> {
+    let v: serde_json::Value = serde_json::from_str(first_line).ok()?;
+    if v.get("type")?.as_str()? != "session_meta" {
+        return None;
+    }
+    let p = v.get("payload")?;
+    Some((p.get("session_id")?.as_str()?.to_string(), p.get("cwd")?.as_str()?.to_string()))
+}
+
+/// codex's `resume --last` doesn't follow in-TUI session switches; find the
+/// newest rollout file whose session_meta cwd is this directory instead.
+fn codex_latest_session(cwd: &str) -> Option<String> {
+    fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        for e in fs::read_dir(dir).into_iter().flatten().filter_map(|e| e.ok()) {
+            let p = e.path();
+            if p.is_dir() {
+                walk(&p, out);
+            } else if p.extension().is_some_and(|x| x == "jsonl") {
+                out.push(p);
+            }
+        }
+    }
+    let mut files = Vec::new();
+    walk(&dirs::home_dir()?.join(".codex").join("sessions"), &mut files);
+    // newest file first; the first cwd match is the latest session for it
+    files.sort_by_key(|p| std::cmp::Reverse(fs::metadata(p).and_then(|m| m.modified()).ok()));
+    files.iter().find_map(|p| {
+        // rollouts can be megabytes — read only the first line
+        let line = std::io::BufRead::lines(std::io::BufReader::new(fs::File::open(p).ok()?)).next()?.ok()?;
+        let (id, c) = codex_rollout_meta(&line)?;
+        (norm_path(&c) == norm_path(cwd)).then_some(id)
+    })
+}
+
+/// Re-resolve the live session id for claude/pi/cursor terminals: the user may
+/// have /resume-switched inside the agent, and the newest session by mtime is
 /// the one currently loaded. ponytail: with several terminals on the same cwd
-/// this picks the same file for all of them — accepted, that's rare.
+/// this picks the same session for all of them — accepted, that's rare.
 fn live_session_id(agent: &str, cwd: &str, assigned: &str) -> String {
     let dir = match agent {
         "claude" => dirs::home_dir().unwrap_or_default().join(".claude").join("projects").join(claude_project_dir_name(cwd)),
         "pi" => dirs::home_dir().unwrap_or_default().join(".pi").join("agent").join("sessions").join(pi_session_dir_name(cwd)),
+        "agent" => dirs::home_dir().unwrap_or_default().join(".cursor").join("chats").join(cursor_chat_dir_name(cwd)),
         _ => return assigned.to_string(),
     };
+    let is_cursor = agent == "agent";
     fs::read_dir(&dir)
         .ok()
         .into_iter()
         .flatten()
         .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().is_some_and(|x| x == "jsonl"))
-        .max_by_key(|e| e.metadata().and_then(|m| m.modified()).ok())
-        .and_then(|e| e.path().file_stem().map(|s| s.to_string_lossy().into_owned()))
+        // claude/pi: sessions are <id>.jsonl files; cursor: <chatId> directories
+        .filter(|e| if is_cursor { e.path().is_dir() } else { e.path().extension().is_some_and(|x| x == "jsonl") })
+        .max_by_key(|e| {
+            let p = e.path();
+            let self_mt = e.metadata().and_then(|m| m.modified()).ok();
+            // a dir's own mtime doesn't track writes to files inside it
+            let inner_mt = if p.is_dir() {
+                fs::read_dir(&p).ok().into_iter().flatten().filter_map(|f| f.ok())
+                    .filter_map(|f| f.metadata().and_then(|m| m.modified()).ok())
+                    .max()
+            } else {
+                None
+            };
+            [self_mt, inner_mt].into_iter().flatten().max()
+        })
+        .and_then(|e| {
+            let p = e.path();
+            let name = if is_cursor { p.file_name() } else { p.file_stem() };
+            name.map(|s| s.to_string_lossy().into_owned())
+        })
         .unwrap_or_else(|| assigned.to_string())
 }
 
@@ -662,8 +769,8 @@ fn save_ui_state(state: serde_json::Value) -> Result<(), String> {
         let workspaces = load_workspaces();
         for term in terms.iter_mut() {
             let agent = term.get("agentKey").and_then(|v| v.as_str()).unwrap_or("");
-            if agent != "claude" && agent != "pi" {
-                continue; // only these two have deterministic session ids
+            if !matches!(agent, "claude" | "pi" | "agent") {
+                continue; // only these have deterministic, re-resolvable session ids
             }
             let ws_id = term.get("wsId").and_then(|v| v.as_str()).unwrap_or("");
             let cwd = workspaces
@@ -1058,6 +1165,47 @@ mod tests {
         // external launches pass an empty id → no session assignment
         let ext = build_agent("claude", &w, "", false, "").unwrap().args;
         assert!(!ext.contains("--session-id"), "external: {ext}");
+    }
+
+    #[test]
+    fn cursor_resume_by_id_when_chat_exists_else_continue() {
+        let w = ws("n", "d");
+        // unknown id → fall back to latest-session continue
+        let missing = build_agent("agent", &w, "no-such-chat-id", true, "").unwrap().args;
+        assert!(missing.contains("--continue") && !missing.contains("--resume"), "fallback: {missing}");
+        // existing chat dir → deterministic resume by id (empty projects →
+        // primary = home dir, so the chat lands in home's cursor chat dir)
+        let cwd = dirs::home_dir().unwrap();
+        let chat = cwd.join(".cursor").join("chats").join(cursor_chat_dir_name(&cwd.to_string_lossy())).join("ws-test-chat");
+        fs::create_dir_all(&chat).unwrap();
+        let args = build_agent("agent", &w, "ws-test-chat", true, "").unwrap().args;
+        fs::remove_dir_all(&chat).ok();
+        assert!(args.contains("--resume \"ws-test-chat\""), "resume by id: {args}");
+    }
+
+    #[test]
+    fn codex_rollout_meta_parses_session_line() {
+        let line = r#"{"timestamp":"2026-09-05T14:29:42.999Z","type":"session_meta","payload":{"session_id":"01a071f9-a477","cwd":"E:\\xu.lu_MGAStream\\Client"}}"#;
+        assert_eq!(
+            codex_rollout_meta(line),
+            Some(("01a071f9-a477".to_string(), "E:\\xu.lu_MGAStream\\Client".to_string()))
+        );
+        assert_eq!(codex_rollout_meta(r#"{"type":"response_item"}"#), None);
+        assert_eq!(codex_rollout_meta("garbage"), None);
+    }
+
+    #[test]
+    fn opencode_picks_latest_session_for_dir() {
+        let json = r#"[
+            {"id":"ses_old","updated":100,"directory":"E:\\workspacer"},
+            {"id":"ses_new","updated":200,"directory":"E:\\workspacer"},
+            {"id":"ses_other","updated":300,"directory":"E:\\other"}
+        ]"#;
+        // newest in the dir wins; other dirs ignored; slash/case-insensitive
+        assert_eq!(pick_latest_session(json, "E:/workspacer").as_deref(), Some("ses_new"));
+        assert_eq!(pick_latest_session(json, "e:\\WORKSPACER").as_deref(), Some("ses_new"));
+        assert_eq!(pick_latest_session(json, "E:\\nowhere"), None);
+        assert_eq!(pick_latest_session("not json", "E:\\workspacer"), None);
     }
 
     #[test]
