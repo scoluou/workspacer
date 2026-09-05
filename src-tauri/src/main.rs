@@ -466,8 +466,13 @@ fn launch_agent_embedded(
     session_label: String,
 ) -> Result<LaunchInfo, String> {
     let spec = resolve_launch(&workspace_id, agent_override, &session_id, resume, &session_label)?;
-    // agents are .cmd shims → must run under cmd; our args string is already
-    // quoted, and portable-pty joins without re-quoting, so the line survives intact
+    // agents are .cmd shims → must run under cmd. portable-pty MSVC-quotes
+    // every argv element (cmdbuilder.rs append_quoted), so `cmd /c <our
+    // pre-quoted line>` gets re-quoted and the inner quotes break (codex:
+    // "unexpected argument ''x''"); a temp .bat parses in the system ANSI
+    // codepage and mangles non-ASCII text. Instead hand the line to cmd via
+    // an env var — the env block is UTF-16 (lossless) and %VAR% expansion
+    // yields the exact line for cmd to parse, quotes and CJK intact.
     let cmdline = if spec.args.is_empty() { spec.prog.clone() } else { format!("{} {}", spec.prog, spec.args) };
     let pty = native_pty_system();
     // spawn at the terminal's real size — starting at 80x24 and resizing after
@@ -476,7 +481,8 @@ fn launch_agent_embedded(
         .openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
         .map_err(|e| e.to_string())?;
     let mut cmd = CommandBuilder::new("cmd.exe");
-    cmd.args(["/c", &cmdline]);
+    cmd.env("WORKSPACER_LAUNCH", &cmdline);
+    cmd.args(["/c", "%WORKSPACER_LAUNCH%"]);
     cmd.cwd(&spec.cwd);
     let child = pair.slave.spawn_command(cmd).map_err(|e| e.to_string())?;
     let writer = pair.master.take_writer().map_err(|e| e.to_string())?;
