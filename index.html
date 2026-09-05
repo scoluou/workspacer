@@ -21,12 +21,14 @@
       --text-faint: #6a6a6a;
       --accent: #4f8cff;
       --accent-dim: rgba(79, 140, 255, 0.14);
+      --on-accent: #fff;
       --danger: #e5534b;
       --green: #4ac26b;
       --yellow: #d29922;
       --term-magenta: #8b5cf6;
       --term-cyan: #39c5cf;
       --radius: 6px;
+      color-scheme: dark; /* native control parts (select dropdown etc.) follow the theme */
       /* Cursor/VS Code editor default (Consolas, Courier New) with an explicit
          CJK floor: Courier New has no CJK, so 中文 lands on YaHei (tight,
          proportional) instead of whatever the OS font-linking picks. Maple
@@ -35,6 +37,7 @@
       --mono: Consolas, "Courier New", "Microsoft YaHei", "Cascadia Code", "JetBrains Mono", monospace;
     }
     [data-theme="light"] {
+      color-scheme: light;
       --bg: #ffffff; --bg-sidebar: #f3f4f6; --bg-raised: #ffffff;
       --bg-hover: #e9ebef; --bg-active: #dde3ea;
       --border: #d4d7dc; --border-subtle: #e7eaee;
@@ -162,9 +165,9 @@
     /* tab bar (VS Code style) */
     .tabbar { display: flex; background: var(--bg-sidebar); border-bottom: 1px solid var(--border-subtle); overflow-x: auto; flex: 0 0 auto; }
     .tab {
-      display: flex; align-items: center; gap: 8px; padding: 7px 8px 7px 14px;
+      display: flex; align-items: center; gap: 8px;
       font-size: 0.92rem; color: var(--text-dim); cursor: pointer; user-select: none;
-      border-right: 1px solid var(--border-subtle); white-space: nowrap;
+      white-space: nowrap;
     }
     .tab:hover { color: var(--text); }
     .tab.active { background: var(--bg); color: var(--text); box-shadow: inset 0 2px 0 var(--accent); }
@@ -178,7 +181,7 @@
     .subtabbar { background: var(--bg); }
     .subtabbar .tab { padding: 5px 8px 5px 12px; font-size: 0.88rem; }
     .tab.exited { opacity: 0.55; }
-    .tab-agents { margin-left: auto; border-right: none; border-left: 1px solid var(--border-subtle); }
+    .tab-agents { margin-left: auto; }
     .agent-ws { color: var(--text-faint); }
     /* embedded terminal (prototype) */
     .term-wrap { display: flex; flex-direction: row; height: 100%; }
@@ -191,7 +194,9 @@
     .conv-item .t { color: var(--text-faint); font-size: 0.78rem; }
     .conv-empty { padding: 10px; color: var(--text-faint); font-size: 0.88rem; }
     .term-host { flex: 1; overflow: hidden; padding: 8px; background: var(--bg); }
-    .term-el { height: 100%; background: var(--bg); }
+    /* frame the terminal so the agent area reads as a distinct panel against
+       the (now identical) app background */
+    .term-el { height: 100%; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
     .term-el .terminal { height: 100%; background: var(--bg); }
     .term-el .xterm-viewport { background: var(--bg) !important; }
     .term-el .xterm-viewport::-webkit-scrollbar { width: 8px; }
@@ -252,6 +257,20 @@
     .ws-detail-head { display: flex; align-items: center; gap: 12px; margin-bottom: 4px; }
     .ws-detail-head h1 { flex: 1; }
     .chip { font-size: 0.85rem; color: var(--accent); background: var(--accent-dim); padding: 2px 9px; border-radius: 20px; font-weight: 500; }
+    /* two label levels, each tab is a uniform chip: L1 = workspace tabs
+       (light blue), L2 = project/agent sub-tabs (light purple) */
+    .tabbar { gap: 6px; padding: 5px 8px; }
+    .tab {
+      border-radius: 6px; padding: 4px 8px 4px 10px;
+      background: color-mix(in srgb, var(--accent) 22%, transparent); color: var(--accent);
+    }
+    .tab.active { background: var(--accent); color: var(--on-accent); box-shadow: none; }
+    .subtabbar { gap: 5px; padding: 4px 8px; }
+    .subtabbar .tab {
+      padding: 3px 7px 3px 9px;
+      background: color-mix(in srgb, var(--term-magenta) 16%, transparent); color: var(--term-magenta);
+    }
+    .subtabbar .tab.active { background: color-mix(in srgb, var(--term-magenta) 32%, transparent); color: var(--text); }
     .proj-list { display: flex; flex-direction: column; }
     .file-group { margin-left: 24px; }
     .collapsible { cursor: pointer; user-select: none; }
