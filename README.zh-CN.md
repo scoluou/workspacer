@@ -51,8 +51,8 @@ workspace、为每个 agent 拼好正确的命令、一键恢复会话。
 
 | Agent | 命令 | 主目录参数 | 附加目录 | 会话恢复 |
 |-------|------|-----------|----------|----------|
-| Cursor CLI | `agent` | `--workspace` | `--add-dir` | `--continue` |
-| Codex CLI | `codex` | `-C` | `--add-dir` | `resume --last` |
+| Cursor CLI | `agent` | `--workspace` | `--add-dir` | `--resume <id>` |
+| Codex CLI | `codex` | `-C` | `--add-dir` | `resume <id>` |
 | Claude Code | `claude` | 工作目录 | `--add-dir` | `--resume <id>` |
 | OpenCode | `opencode` | 位置参数 | 仅单目录 | `--continue` |
 | PI Agent | `pi` | 工作目录 | 仅单目录 | `--session-id <id>` |

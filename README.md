@@ -56,8 +56,8 @@ one-click session resume.
 
 | Agent | CLI | Primary dir | Extra dirs | Session resume |
 |-------|-----|-------------|------------|----------------|
-| Cursor CLI | `agent` | `--workspace` | `--add-dir` | `--continue` |
-| Codex CLI | `codex` | `-C` | `--add-dir` | `resume --last` |
+| Cursor CLI | `agent` | `--workspace` | `--add-dir` | `--resume <id>` |
+| Codex CLI | `codex` | `-C` | `--add-dir` | `resume <id>` |
 | Claude Code | `claude` | working dir | `--add-dir` | `--resume <id>` |
 | OpenCode | `opencode` | positional | single-dir only | `--continue` |
 | PI Agent | `pi` | working dir | single-dir only | `--session-id <id>` |
