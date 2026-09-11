@@ -34,7 +34,7 @@
          proportional) instead of whatever the OS font-linking picks. Maple
          Mono NF CN stays available as an explicit choice in settings. */
       --font: Consolas, "Courier New", "Microsoft YaHei", -apple-system, "Segoe UI", "Inter", sans-serif;
-      --mono: Consolas, "Courier New", "Microsoft YaHei", "Cascadia Code", "JetBrains Mono", monospace;
+      --mono: Consolas, "Courier New", "Maple Mono NF CN", "Microsoft YaHei", monospace;
     }
     [data-theme="light"] {
       color-scheme: light;
@@ -175,6 +175,7 @@
     .tab-close:hover { color: #fff; background: var(--danger); }
     .tab-pin:hover { background: var(--bg-hover); }
     .tab.pinned { color: var(--text); }
+    .tab.pane-mate { background: var(--bg); color: var(--text); box-shadow: inset 0 2px 0 var(--accent-dim); }
     .tab.dragging { background: var(--accent-dim); }
     .tab.drag-over { box-shadow: inset 2px 0 0 var(--accent); }
     .tab.drag-over-end { box-shadow: inset -2px 0 0 var(--accent); }
@@ -197,7 +198,29 @@
     /* frame the terminal so the agent area reads as a distinct panel against
        the (now identical) app background */
     .term-el { height: 100%; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+    /* dock panes: a column each, own tab strip on top; focus shows on the tab */
+    .pane-col { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+    .pane-col + .pane-col { border-left: 1px solid var(--border-subtle); }
+    .subtab-row { display: flex; }
+    .subtab-row .subtabbar { flex: 1 1 0; min-width: 0; }
+    /* dock preview: the rectangle the dragged terminal would fill */
+    #dockHint {
+      position: fixed; z-index: 40; pointer-events: none;
+      background: var(--accent-dim); border: 2px solid var(--accent); border-radius: 6px;
+    }
+    /* the dragged row's label, carried by the pointer */
+    .drag-ghost {
+      position: fixed; left: 0; top: 0; z-index: 1050; pointer-events: none;
+      max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+      padding: 4px 10px; font-size: 0.88rem; color: var(--text);
+      background: var(--bg-raised); border: 1px solid var(--accent); border-radius: 4px;
+      box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
+    }
     .term-el .terminal { height: 100%; background: var(--bg); }
+    .codex-fake-cursor {
+      position: absolute; z-index: 8; width: 2px; pointer-events: none;
+      background: var(--text);
+    }
     .term-el .xterm-viewport { background: var(--bg) !important; }
     .term-el .xterm-viewport::-webkit-scrollbar { width: 8px; }
     .term-el .xterm-viewport::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }

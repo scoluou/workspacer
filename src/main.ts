@@ -7,6 +7,7 @@ import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 import { attachImeHeuristic } from "./ime-anchor";
+import { hideCodexCursor, keepComposerCursor, type CursorAnchor } from "./codex-output";
 
 interface Project { path: string; description: string; }
 interface Workspace {
@@ -382,6 +383,17 @@ function applyAppearance() {
   const root = document.documentElement;
   if (settings.theme) root.dataset.theme = settings.theme;
   else delete root.dataset.theme;
+  if (settings.fontFamily) {
+    const uiStack = `"${settings.fontFamily}", Consolas, "Microsoft YaHei", "Maple Mono NF CN", monospace`;
+    // Terminal CJK must use a full-width mono fallback; YaHei is proportional
+    // and makes Chinese columns drift away from xterm's cell grid.
+    const monoStack = `"${settings.fontFamily}", Consolas, "Maple Mono NF CN", "Microsoft YaHei", monospace`;
+    root.style.setProperty("--font", uiStack);
+    root.style.setProperty("--mono", monoStack);
+  } else {
+    root.style.removeProperty("--font");
+    root.style.removeProperty("--mono");
+  }
   // darken the Windows title bar to match (light theme keeps it light)
   invoke("set_titlebar_dark", { dark: settings.theme !== "light" });
   // live-update embedded terminals too (xterm supports runtime theme switch)
@@ -391,7 +403,13 @@ function applyAppearance() {
     if (mono) sess.term.options.fontFamily = mono;
     sess.term.options.fontSize = settings.fontSize ?? 13;
     sess.term.options.fontWeight = (settings.fontWeight ?? 400) as 400;
+    if (sess.el.isConnected) sess.fit.fit();
   });
+  document.fonts.ready.then(() => termSessions.forEach((sess) => {
+    if (!sess.el.isConnected) return;
+    sess.fit.fit();
+    sess.term.refresh(0, sess.term.rows - 1);
+  }));
   if (settings.fontSize) root.style.setProperty("--font-size", settings.fontSize + "px");
   else root.style.removeProperty("--font-size");
   if (settings.fontWeight) root.style.setProperty("--font-weight", String(settings.fontWeight));
@@ -403,16 +421,6 @@ function applyAppearance() {
   } else {
     sidebar.style.removeProperty("width");
     sidebar.style.removeProperty("flex");
-  }
-  if (settings.fontFamily) {
-    // CJK falls back to YaHei (tight, proportional) before Maple Mono NF CN
-    // (full-width mono); Maple last for its Nerd Font icons
-    const stack = `"${settings.fontFamily}", Consolas, "Microsoft YaHei", "Maple Mono NF CN", monospace`;
-    root.style.setProperty("--font", stack);
-    root.style.setProperty("--mono", stack);
-  } else {
-    root.style.removeProperty("--font");
-    root.style.removeProperty("--mono");
   }
 }
 
@@ -429,7 +437,11 @@ let suppressClickUntil = 0;
 // covers touch). Mouse: press and move >4px. Touch: long-press 350ms first, so
 // vertical scrolling still works. onMove(from, to) gets sibling indices and
 // must persist + re-render.
-function wireDragReorder(els: HTMLElement[], onMove: (from: number, to: number) => Promise<void>, onDelete?: (index: number) => Promise<void>, axis: "y" | "x" = "y") {
+// onDropOutside lets a caller claim drops that land outside the row strip (the
+// sub-tabbar uses it to dock a tab into a terminal pane). It is called on every
+// move with preview=true (draw your own hint, we skip the insertion indicator)
+// and once on release with preview=false; returning false means "not mine".
+function wireDragReorder(els: HTMLElement[], onMove: (from: number, to: number) => Promise<void>, onDelete?: (index: number) => Promise<void>, axis: "y" | "x" = "y", onDropOutside?: (index: number, ev: PointerEvent, preview: boolean) => boolean) {
   const trash = () => document.getElementById("trashDrop");
   const overTrash = (x: number, y: number) => {
     const t = trash();
@@ -458,10 +470,20 @@ function wireDragReorder(els: HTMLElement[], onMove: (from: number, to: number) 
       if (!isTouch) e.preventDefault(); // mouse: suppress text selection while dragging
       const startX = e.clientX, startY = e.clientY;
       let dragging = false;
+      // label that follows the pointer, so a drag reads as "carrying" the row
+      let ghost: HTMLElement | null = null;
+      const moveGhost = (ev: PointerEvent) => {
+        if (ghost) ghost.style.transform = `translate(${ev.clientX + 12}px, ${ev.clientY + 10}px)`;
+      };
       const begin = () => {
         dragging = true;
         el.classList.add("dragging");
         el.setPointerCapture(e.pointerId);
+        ghost = document.createElement("div");
+        ghost.className = "drag-ghost";
+        ghost.textContent = (el.querySelector(".tab-label, .p") ?? el).textContent ?? "";
+        ghost.style.transform = `translate(${startX + 12}px, ${startY + 10}px)`;
+        document.body.appendChild(ghost);
         if (onDelete) trash()?.classList.add("show");
       };
       // touch enters drag mode only after a hold; moving earlier means scroll
@@ -473,14 +495,17 @@ function wireDragReorder(els: HTMLElement[], onMove: (from: number, to: number) 
           else if (dist > 4) begin();
           return;
         }
+        moveGhost(ev);
         // indicator always follows the pointer, even over the row's current
         // position (visual feedback; the actual save below still skips no-ops)
-        const onTrash = overTrash(ev.clientX, ev.clientY);
+        const outside = onDropOutside?.(i, ev, true) ?? false;
+        const onTrash = !outside && overTrash(ev.clientX, ev.clientY);
         trash()?.classList.toggle("drag-over", onTrash);
         const at = insertAt(axisPos(ev));
+        const hide = outside || onTrash;
         els.forEach((x, j) => {
-          x.classList.toggle("drag-over", !onTrash && at === j);
-          x.classList.toggle("drag-over-end", !onTrash && at === els.length && j === els.length - 1);
+          x.classList.toggle("drag-over", !hide && at === j);
+          x.classList.toggle("drag-over-end", !hide && at === els.length && j === els.length - 1);
         });
       };
       const onUp = async (ev: PointerEvent) => {
@@ -490,6 +515,7 @@ function wireDragReorder(els: HTMLElement[], onMove: (from: number, to: number) 
         el.classList.remove("dragging");
         els.forEach((x) => x.classList.remove("drag-over", "drag-over-end"));
         trash()?.classList.remove("show", "drag-over");
+        if (onDropOutside?.(i, ev, false)) return;
         if (overTrash(ev.clientX, ev.clientY)) {
           await onDelete!(i);
           return;
@@ -509,6 +535,8 @@ function wireDragReorder(els: HTMLElement[], onMove: (from: number, to: number) 
       };
       const cleanup = () => {
         window.clearTimeout(timer);
+        ghost?.remove();
+        ghost = null;
         el.removeEventListener("pointermove", onPointerMove);
         el.removeEventListener("pointerup", onUp);
         el.removeEventListener("pointercancel", cancel);
@@ -629,13 +657,16 @@ function tabbarHtml(): string {
     .join("");
   return `<div class="tabbar">${tabs}<div class="tab tab-agents${view.kind === "agents" ? " active" : ""}" data-tab="agents"><span class="tab-label">⚡ ${esc(t("agentsTab"))}${running ? ` (${running})` : ""}</span></div></div>`;
 }
-// sub-tab bar: the active workspace's project page + terminal sessions
-function subTabbarHtml(wsId: string): string {
-  const ids = orderOf(wsId);
-  const activeId = view.kind === "terminal" ? Number((view as { id: string }).id) : null;
+// One pane's tab strip: the pane's own terminals, plus (leftmost pane only) the
+// workspace's project page. The focused pane's active tab is "active"; the other
+// pane's active tab is visible but unfocused ("pane-mate").
+function subTabbarHtml(wsId: string, p: Pane, idx: number): string {
+  const focused = focusedTerm();
   const projActive = view.kind === "workspace" && (view as { id: string }).id === wsId;
-  const projTab = `<div class="tab subtab-proj${projActive ? " active" : ""}" data-subproj="${wsId}"><span class="tab-label">🗂️ ${esc(t("workspaceTab"))}</span></div>`;
-  const terms = ids
+  const projTab = idx === 0
+    ? `<div class="tab subtab-proj${projActive ? " active" : ""}" data-subproj="${wsId}"><span class="tab-label">🗂️ ${esc(t("workspaceTab"))}</span></div>`
+    : "";
+  const terms = p.tabs
     .map((tid) => {
       const s = termSessions.get(tid);
       if (!s) return "";
@@ -645,32 +676,106 @@ function subTabbarHtml(wsId: string): string {
       const tail = s.pinned
         ? `<span class="tab-close tab-pin" data-subpin="${tid}" title="${esc(t("unpin"))}">📌</span>`
         : `<span class="tab-close" data-subclose="${tid}" title="${esc(t("closeTab"))}">✕</span>`;
-      return `<div class="tab${tid === activeId ? " active" : ""}${s.spawned ? "" : " exited"}" data-subtab="${tid}"><span class="tab-label">${label}</span>${tail}</div>`;
+      return `<div class="tab${tid === focused ? " active" : tid === p.active ? " pane-mate" : ""}${s.spawned ? "" : " exited"}" data-subtab="${tid}"><span class="tab-label">${label}</span>${tail}</div>`;
     })
     .join("");
-  return `<div class="tabbar subtabbar">${projTab}${terms}</div>`;
+  return `<div class="tabbar subtabbar" data-bar="${idx}">${projTab}${terms}</div>`;
 }
 
+// Which pane a dragged tab would land in (null: pointer isn't over the panes).
+// A pane's middle means "join this pane's strip"; its outer third means "dock to
+// that side" — which, with only one pane open, splits off a new one.
+interface DockZone { pane: number; newPane: boolean; rect: DOMRect }
+function dockZone(x: number, y: number): DockZone | null {
+  const cols = Array.from(document.querySelectorAll<HTMLElement>(".pane-col"));
+  const at = cols.findIndex((c) => {
+    const r = c.getBoundingClientRect();
+    return x >= r.left && x <= r.right && y >= r.top && y <= r.bottom;
+  });
+  if (at < 0) return null;
+  const r = cols[at].getBoundingClientRect();
+  // dropped on a pane's tab strip: join that pane, whichever third it was
+  const strip = cols[at].querySelector<HTMLElement>(".subtabbar")?.getBoundingClientRect();
+  if (strip && y >= strip.top && y <= strip.bottom) return { pane: at, newPane: false, rect: r };
+  const rel = (x - r.left) / (r.width || 1);
+  const side = rel < 0.3 ? "left" : rel > 0.7 ? "right" : "center";
+  if (side === "center") return { pane: at, newPane: false, rect: r };
+  if (cols.length >= MAX_PANES) {
+    // already split: an edge means the pane sitting on that side
+    const pane = side === "left" ? 0 : cols.length - 1;
+    return { pane, newPane: false, rect: cols[pane].getBoundingClientRect() };
+  }
+  const half = new DOMRect(side === "right" ? r.left + r.width / 2 : r.left, r.top, r.width / 2, r.height);
+  return { pane: side === "left" ? 0 : 1, newPane: true, rect: half };
+}
+// imgui-style preview: the rectangle the dragged terminal would end up filling
+function showDockHint(zone: DockZone) {
+  let el = document.getElementById("dockHint");
+  if (!el) {
+    el = document.createElement("div");
+    el.id = "dockHint";
+    document.body.appendChild(el);
+  }
+  el.style.left = `${zone.rect.left}px`;
+  el.style.top = `${zone.rect.top}px`;
+  el.style.width = `${zone.rect.width}px`;
+  el.style.height = `${zone.rect.height}px`;
+}
+function clearDockHint() {
+  document.getElementById("dockHint")?.remove();
+}
+// a cancelled drag never reaches the drop handler that would clear the hint
+document.addEventListener("pointercancel", clearDockHint, true);
+
 function wireSubTabbar(wsId: string) {
-  const projEl = document.querySelector<HTMLElement>("[data-subproj]");
-  projEl?.addEventListener("click", () => {
+  document.querySelector<HTMLElement>("[data-subproj]")?.addEventListener("click", () => {
     view = { kind: "workspace", id: wsId };
     render();
   });
-  const els = Array.from(document.querySelectorAll<HTMLElement>(".subtabbar .tab[data-subtab]"));
-  wireDragReorder(els, async (from, to) => {
-    const order = orderOf(wsId);
-    order.splice(to, 0, ...order.splice(from, 1));
-    render();
-  }, undefined, "x");
+  const panes = panesOf(wsId);
+  document.querySelectorAll<HTMLElement>("[data-bar]").forEach((bar) => {
+    const p = panes[Number(bar.dataset.bar)];
+    if (!p) return;
+    const els = Array.from(bar.querySelectorAll<HTMLElement>(".tab[data-subtab]"));
+    // reorder within this pane's strip; dropping over a pane docks instead
+    wireDragReorder(els, async (from, to) => {
+      p.tabs.splice(to, 0, ...p.tabs.splice(from, 1));
+      render();
+    }, undefined, "x", (i, ev, preview) => {
+      clearDockHint();
+      const own = bar.getBoundingClientRect(); // inside its own strip: reorder
+      if (ev.clientY >= own.top && ev.clientY <= own.bottom) return false;
+      const zone = dockZone(ev.clientX, ev.clientY);
+      if (!zone) return false;
+      if (preview) {
+        showDockHint(zone);
+        return true;
+      }
+      dockTerm(wsId, Number(els[i].dataset.subtab), zone);
+      return true;
+    });
+    wireSubTabs(wsId, els);
+  });
+  document.querySelectorAll<HTMLElement>("[data-subclose]").forEach((el) =>
+    el.addEventListener("click", (e) => {
+      e.stopPropagation();
+      closeSubTabs(wsId, [Number((el as HTMLElement).dataset.subclose)]);
+    })
+  );
+  document.querySelectorAll<HTMLElement>("[data-subpin]").forEach((el) =>
+    el.addEventListener("click", (e) => {
+      e.stopPropagation();
+      pinSubTab(wsId, Number((el as HTMLElement).dataset.subpin));
+    })
+  );
+}
+function wireSubTabs(wsId: string, els: HTMLElement[]) {
   els.forEach((el) => {
     const tid = Number(el.dataset.subtab);
     el.addEventListener("click", (e) => {
       if (Date.now() < suppressClickUntil) return;
       if ((e.target as HTMLElement).closest(".tab-close, .tab-pin")) return;
-      lastTermByWs.set(wsId, tid);
-      view = { kind: "terminal", id: String(tid) };
-      render();
+      focusTerm(wsId, tid);
     });
     el.addEventListener("auxclick", (e) => {
       if (e.button === 1) closeSubTabs(wsId, [tid]);
@@ -690,18 +795,6 @@ function wireSubTabbar(wsId: string) {
       ]);
     });
   });
-  document.querySelectorAll<HTMLElement>("[data-subclose]").forEach((el) =>
-    el.addEventListener("click", (e) => {
-      e.stopPropagation();
-      closeSubTabs(wsId, [Number((el as HTMLElement).dataset.subclose)]);
-    })
-  );
-  document.querySelectorAll<HTMLElement>("[data-subpin]").forEach((el) =>
-    el.addEventListener("click", (e) => {
-      e.stopPropagation();
-      pinSubTab(wsId, Number((el as HTMLElement).dataset.subpin));
-    })
-  );
 }
 
 // open a workspace: the most recently used agent tab, else the project page
@@ -770,8 +863,12 @@ function wireTabbar() {
 }
 let convBarWidth = 220; // session-scoped; drag the handle to resize
 
-function terminalHtml(): string {
-  return `<div class="term-wrap"><div class="term-host" id="termHost"></div><div class="conv-resize" id="convResize"></div><div class="conv-bar" id="convBar" style="width:${convBarWidth}px"></div></div>`;
+// each pane is a column: its own tab strip on top, its active terminal below
+function terminalHtml(wsId: string, panes: Pane[]): string {
+  const cols = panes
+    .map((p, i) => `<div class="pane-col">${subTabbarHtml(wsId, p, i)}<div class="term-host" data-pane="${p.active}"></div></div>`)
+    .join("");
+  return `<div class="term-wrap">${cols}<div class="conv-resize" id="convResize"></div><div class="conv-bar" id="convBar" style="width:${convBarWidth}px"></div></div>`;
 }
 
 // aggregate view: every live/exited terminal session across workspaces
@@ -797,8 +894,8 @@ function wireAgents() {
   document.querySelectorAll("[data-term-open]").forEach((el) =>
     el.addEventListener("click", (e) => {
       if ((e.target as HTMLElement).closest("[data-term-close]")) return;
-      view = { kind: "terminal", id: (el as HTMLElement).dataset.termOpen! };
-      render();
+      const s = termSessions.get(Number((el as HTMLElement).dataset.termOpen));
+      if (s) focusTerm(s.wsId, s.id);
     })
   );
   document.querySelectorAll("[data-term-close]").forEach((el) =>
@@ -811,17 +908,25 @@ function wireAgents() {
   );
 }
 
-function wireTerminal(termId: number) {
-  const sess = termSessions.get(termId);
+function wireTerminal(focused: number) {
+  const sess = termSessions.get(focused);
   if (!sess) return;
-  const host = $("termHost");
-  if (sess.el.parentElement !== host) host.appendChild(sess.el);
+  document.querySelectorAll<HTMLElement>("[data-pane]").forEach((host) => {
+    const s = termSessions.get(Number(host.dataset.pane));
+    if (!s) return;
+    if (s.el.parentElement !== host) host.appendChild(s.el);
+    if (s.spawned) {
+      if (s.el.clientWidth > 0 && s.el.clientHeight > 0) s.fit.fit();
+    } else {
+      startTerminal(s); // first activation: open xterm + spawn/resume the PTY
+    }
+    // focus on click, not pointerdown: re-rendering moves the xterm node, which
+    // would cut a drag-select started in the unfocused pane short
+    if (s.id !== focused) host.addEventListener("click", () => {
+      if (Date.now() >= suppressClickUntil) focusTerm(s.wsId, s.id); // not the trailing click of a drag
+    });
+  });
   renderConvBar(sess);
-  if (sess.spawned) {
-    if (sess.el.clientWidth > 0 && sess.el.clientHeight > 0) sess.fit.fit();
-  } else {
-    startTerminal(sess); // first activation: open xterm + spawn/resume the PTY
-  }
   // conversation bar width: drag the handle at its left edge
   const handle = $("convResize");
   handle?.addEventListener("pointerdown", (e) => {
@@ -902,9 +1007,12 @@ function renderMain() {
       renderMain();
       return;
     }
-    subFor = sess.wsId;
-    content = terminalHtml();
-    wire = () => wireTerminal(termId);
+    // the tab strips live inside the panes here, not above the content
+    content = terminalHtml(sess.wsId, panesOf(sess.wsId));
+    wire = () => {
+      wireSubTabbar(sess.wsId);
+      wireTerminal(termId);
+    };
   } else {
     const ws = workspaces.find((w) => w.id === (view as { id: string }).id);
     if (!ws) {
@@ -917,7 +1025,9 @@ function renderMain() {
     wire = () => wireWorkspaceDetail(ws);
   }
   const flush = view.kind === "terminal";
-  main.innerHTML = `${tabbarHtml()}${subFor ? subTabbarHtml(subFor) : ""}<div class="content-wrap${flush ? " content-flush" : ""}">${content}</div>`;
+  // project page: every pane's strip in one row, so no tab is out of reach
+  const subBars = subFor ? `<div class="subtab-row">${panesOf(subFor).map((p, i) => subTabbarHtml(subFor!, p, i)).join("")}</div>` : "";
+  main.innerHTML = `${tabbarHtml()}${subBars}<div class="content-wrap${flush ? " content-flush" : ""}">${content}</div>`;
   wireTabbar();
   if (subFor) wireSubTabbar(subFor);
   wire();
@@ -1337,21 +1447,91 @@ function activeWsId(): string | null {
   return null;
 }
 
-// terminal sub-tab order per workspace; sessions hold the runtime state
-const termOrder = new Map<string, number[]>(); // wsId -> [termId]
+// Dock model, imgui-style: a workspace's terminals live in panes laid out
+// left→right, and every pane owns its own tab strip (rendered above its own
+// terminal). Dragging a tab into another pane moves it between strips; a pane
+// with no tabs left disappears. Sessions hold the runtime state.
+// ponytail: at most two panes, fixed 50/50, no nesting — a recursive dock tree
+// with a draggable divider can replace wsPanes without touching the callers.
+interface Pane { tabs: number[]; active: number }
+const wsPanes = new Map<string, Pane[]>(); // wsId -> panes, left→right
 const lastTermByWs = new Map<string, number>(); // wsId -> last active termId
-function orderOf(wsId: string): number[] {
-  let o = termOrder.get(wsId);
-  if (!o) {
-    o = [];
-    termOrder.set(wsId, o);
+const MAX_PANES = 2;
+// panes with dead sessions pruned and emptied panes dropped (one always stays)
+function panesOf(wsId: string): Pane[] {
+  let ps = wsPanes.get(wsId);
+  if (!ps) {
+    ps = [{ tabs: [], active: NaN }];
+    wsPanes.set(wsId, ps);
   }
-  return o;
+  for (const p of ps) p.tabs = p.tabs.filter((id) => termSessions.has(id));
+  const live = ps.filter((p) => p.tabs.length);
+  if (live.length && live.length !== ps.length) {
+    ps = live;
+    wsPanes.set(wsId, ps);
+  }
+  for (const p of ps) if (!p.tabs.includes(p.active)) p.active = p.tabs[p.tabs.length - 1] ?? NaN;
+  return ps;
+}
+function paneOf(wsId: string, tid: number): Pane | undefined {
+  return panesOf(wsId).find((p) => p.tabs.includes(tid));
+}
+// every tab of the workspace in visual order (left pane's strip, then right's)
+function orderOf(wsId: string): number[] {
+  return panesOf(wsId).flatMap((p) => p.tabs);
+}
+function focusedTerm(): number {
+  return view.kind === "terminal" ? Number((view as { id: string }).id) : NaN;
+}
+// a new terminal joins the strip of whichever pane is focused
+function addTab(wsId: string, tid: number, pinned: boolean) {
+  const ps = panesOf(wsId);
+  const p = ps.find((x) => x.tabs.includes(focusedTerm())) ?? ps[0];
+  let pos = p.tabs.length;
+  if (pinned) {
+    pos = 0;
+    while (pos < p.tabs.length && termSessions.get(p.tabs[pos])?.pinned) pos++;
+  }
+  p.tabs.splice(pos, 0, tid);
+}
+// activate a tab in its own pane and move focus there
+function focusTerm(wsId: string, tid: number) {
+  const ps = panesOf(wsId);
+  const p = ps.find((x) => x.tabs.includes(tid)) ?? ps[0];
+  if (!p.tabs.includes(tid)) p.tabs.push(tid);
+  p.active = tid;
+  lastTermByWs.set(wsId, tid);
+  view = { kind: "terminal", id: String(tid) };
+  render();
+  const s = termSessions.get(tid);
+  if (s?.spawned) s.term.focus();
+}
+// drop a dragged tab into a pane: onto a pane's middle it joins that pane's
+// strip, onto the outer edge of a lone pane it splits off a new pane on that
+// side. Emptying the pane it came from is what un-docks a split.
+function dockTerm(wsId: string, tid: number, zone: DockZone) {
+  const ps = panesOf(wsId);
+  const src = ps.find((p) => p.tabs.includes(tid));
+  if (!src) return;
+  const dst = zone.newPane ? null : ps[zone.pane];
+  if (dst !== src) {
+    if (dst) {
+      src.tabs = src.tabs.filter((id) => id !== tid);
+      dst.tabs.push(tid);
+      dst.active = tid;
+    } else if (src.tabs.length > 1) { // a lone tab splitting off changes nothing
+      src.tabs = src.tabs.filter((id) => id !== tid);
+      ps.splice(zone.pane, 0, { tabs: [tid], active: tid });
+    }
+  }
+  focusTerm(wsId, tid);
 }
 function killTerm(termId: number) {
   const s = termSessions.get(termId);
   if (s) {
     invoke("term_kill", { id: s.id });
+    window.clearTimeout(s.codexCursorTimer);
+    removeCodexFakeCursor(s);
     s.imeDetach?.();
     s.term.dispose();
     termSessions.delete(termId);
@@ -1392,15 +1572,15 @@ async function switchTerminalSession(sess: TermSession, sessionId: string) {
 }
 function closeSubTabs(wsId: string, termIds: number[]) {
   const kill = new Set(termIds);
-  termOrder.set(wsId, orderOf(wsId).filter((id) => {
-    if (!kill.has(id)) return true;
-    killTerm(id);
-    return false;
-  }));
-  if (view.kind === "terminal" && kill.has(Number((view as { id: string }).id))) {
-    const remaining = orderOf(wsId);
-    view = remaining.length ? { kind: "terminal", id: String(remaining[remaining.length - 1]) } : { kind: "workspace", id: wsId };
+  const closingFocused = kill.has(focusedTerm());
+  for (const p of panesOf(wsId)) p.tabs = p.tabs.filter((id) => !kill.has(id));
+  termIds.forEach(killTerm); // panesOf drops panes left with no tabs
+  const remaining = orderOf(wsId);
+  if (view.kind === "terminal" && closingFocused && remaining.length) {
+    focusTerm(wsId, remaining[remaining.length - 1]);
+    return;
   }
+  if (view.kind === "terminal" && closingFocused) view = { kind: "workspace", id: wsId };
   render();
 }
 // top-level (workspace) tab close/pin. Closing a workspace tab never kills its
@@ -1454,12 +1634,14 @@ function pinSubTab(wsId: string, termId: number) {
   if (s.pinned) {
     s.pinned = false; // unpin: stays in place
   } else {
-    s.pinned = true; // pin: move to the front of this workspace's sub-tabs
-    const rest = orderOf(wsId).filter((id) => id !== termId);
-    let pos = 0;
-    while (pos < rest.length && termSessions.get(rest[pos])?.pinned) pos++;
-    rest.splice(pos, 0, termId);
-    termOrder.set(wsId, rest);
+    s.pinned = true; // pin: move to the front of its own pane's strip
+    const p = paneOf(wsId, termId);
+    if (p) {
+      p.tabs = p.tabs.filter((id) => id !== termId);
+      let pos = 0;
+      while (pos < p.tabs.length && termSessions.get(p.tabs[pos])?.pinned) pos++;
+      p.tabs.splice(pos, 0, termId);
+    }
   }
   render();
 }
@@ -1492,8 +1674,34 @@ interface TermSession {
   entries: { text: string; line: number; time: number }[]; // submitted prompts
   inputBuf: string; // line currently being typed (conversation capture)
   imeDetach?: () => void;
+  codexCursorCarry?: string;
+  codexCursorTimer?: number;
+  codexCursorEpoch?: number;
+  codexCursorAnchor?: CursorAnchor;
+  codexFakeCursor?: HTMLElement;
   restarting?: boolean; // session switch in progress: swallow the exit event
 }
+
+function renderCodexFakeCursor(sess: TermSession) {
+  const screen = sess.term.element?.querySelector<HTMLElement>(".xterm-screen");
+  const anchor = sess.codexCursorAnchor;
+  if (!screen || !anchor || sess.codexCursorTimer === undefined) return;
+  const cursor = sess.codexFakeCursor ?? document.createElement("div");
+  cursor.className = "codex-fake-cursor";
+  if (!cursor.isConnected) screen.appendChild(cursor);
+  sess.codexFakeCursor = cursor;
+  const cellWidth = screen.clientWidth / Math.max(sess.term.cols, 1);
+  const cellHeight = screen.clientHeight / Math.max(sess.term.rows, 1);
+  cursor.style.left = `${Math.round(anchor.col * cellWidth)}px`;
+  cursor.style.top = `${Math.round((sess.term.rows - 1 - anchor.rowFromBottom) * cellHeight)}px`;
+  cursor.style.height = `${Math.ceil(cellHeight)}px`;
+}
+
+function removeCodexFakeCursor(sess: TermSession) {
+  sess.codexFakeCursor?.remove();
+  sess.codexFakeCursor = undefined;
+}
+
 // a tab's liveness is derived, not stored: it is "running" as long as its PTY
 // child is alive (term_alive), and "exited" only once the child is really gone.
 // the tab itself stays until the user closes it. The UI reads it via spawned +
@@ -1510,6 +1718,7 @@ let nextTermId = 1;
 async function openTerminal(ws: Workspace, opts: { activate?: boolean; sessionId?: string; sessionLabel?: string; resume?: boolean; pinned?: boolean; agentKey?: string; entries?: { text: string; line: number; time: number }[] } = {}): Promise<TermSession> {
   // every launch spawns a NEW session/sub-tab; the PTY itself starts lazily on
   // first activation (restored tabs don't spawn processes until opened)
+  await document.fonts.ready;
   const id = nextTermId++;
   const term = new Terminal({
     fontFamily: getComputedStyle(document.documentElement).getPropertyValue("--mono").trim() || "monospace",
@@ -1615,28 +1824,65 @@ async function openTerminal(ws: Workspace, opts: { activate?: boolean; sessionId
   term.onResize(({ cols, rows }) => { if (sess.spawned && cols > 0 && rows > 0) invoke("term_resize", { id, cols, rows }); });
   // reflow on window/pane resize (only while attached)
   new ResizeObserver(() => {
-    if (sess.el.isConnected && sess.spawned && sess.el.clientWidth > 0 && sess.el.clientHeight > 0) sess.fit.fit();
+    if (sess.el.isConnected && sess.spawned && sess.el.clientWidth > 0 && sess.el.clientHeight > 0) {
+      sess.fit.fit();
+      renderCodexFakeCursor(sess);
+    }
   }).observe(el);
-  await listen<string>(`term-data-${id}`, (e) => term.write(e.payload));
+  await listen<string>(`term-data-${id}`, (e) => {
+    if (sess.agentKey !== "codex") {
+      term.write(e.payload);
+      return;
+    }
+    const next = hideCodexCursor(e.payload, sess.codexCursorCarry ?? "");
+    sess.codexCursorCarry = next.carry;
+    window.clearTimeout(sess.codexCursorTimer);
+    const epoch = (sess.codexCursorEpoch ?? 0) + 1;
+    sess.codexCursorEpoch = epoch;
+    if (!sess.codexCursorAnchor) {
+      sess.codexCursorAnchor = {
+        col: term.buffer.active.cursorX,
+        rowFromBottom: term.rows - 1 - term.buffer.active.cursorY,
+      };
+    }
+    // Codex currently exposes the hardware cursor at intermediate positions
+    // during Windows TUI frames (openai/codex#16687). Keep it hidden while
+    // output is active; a stable app-drawn cursor covers the composer instead.
+    term.write("\x1b[?25l" + next.text, () => {
+      if (sess.codexCursorEpoch !== epoch || !sess.codexCursorAnchor) return;
+      sess.codexCursorAnchor = keepComposerCursor(sess.codexCursorAnchor, {
+        col: term.buffer.active.cursorX,
+        row: term.buffer.active.cursorY,
+      }, term.rows);
+      renderCodexFakeCursor(sess);
+    });
+    sess.codexCursorTimer = window.setTimeout(() => {
+      term.write("\x1b[?25h", () => {
+        if (sess.codexCursorEpoch !== epoch) return;
+        sess.codexCursorAnchor = {
+          col: term.buffer.active.cursorX,
+          rowFromBottom: term.rows - 1 - term.buffer.active.cursorY,
+        };
+        sess.codexCursorTimer = undefined;
+        removeCodexFakeCursor(sess);
+      });
+    }, 200);
+    renderCodexFakeCursor(sess);
+  });
   await listen(`term-exit-${id}`, () => {
     if (sess.restarting) return; // session switch: the PTY is being replaced
+    window.clearTimeout(sess.codexCursorTimer);
+    if (sess.codexCursorCarry) term.write(sess.codexCursorCarry);
+    sess.codexCursorCarry = "";
+    sess.codexCursorTimer = undefined;
+    removeCodexFakeCursor(sess);
     term.write("\r\n\x1b[90m[process exited]\x1b[0m\r\n"); // tab stays until closed
     render(); // liveness is derived, so this just refreshes labels / dots
   });
   ensureTab(ws.id);
-  const order = orderOf(ws.id);
-  if (sess.pinned) {
-    let pos = 0;
-    while (pos < order.length && termSessions.get(order[pos])?.pinned) pos++;
-    order.splice(pos, 0, id);
-  } else {
-    order.push(id);
-  }
+  addTab(ws.id, id, sess.pinned);
   lastTermByWs.set(ws.id, id);
-  if (opts.activate !== false) {
-    view = { kind: "terminal", id: String(id) };
-    render(); // wireTerminal → startTerminal
-  }
+  if (opts.activate !== false) focusTerm(ws.id, id); // renders → wireTerminal → startTerminal
   return sess;
 }
 
@@ -1736,8 +1982,8 @@ async function deleteWs(ws: Workspace) {
   await invoke("delete_workspace", { id: ws.id });
   // close its top tab and kill all its terminal sessions
   openTabs = openTabs.filter((tb) => tb.wsId !== ws.id);
-  (termOrder.get(ws.id) ?? []).forEach(killTerm);
-  termOrder.delete(ws.id);
+  orderOf(ws.id).forEach(killTerm);
+  wsPanes.delete(ws.id);
   setStatus(t("deleted"));
   await reload();
   if ((view.kind === "workspace" && (view as { id: string }).id === ws.id) ||
@@ -2185,6 +2431,21 @@ function render() {
   renderMain();
   persistUi();
 }
+
+// Alt+←/→ walks the active workspace's agent sub-tabs (wraps at both ends).
+// Capture phase + stopPropagation so xterm never forwards the key to the PTY.
+document.addEventListener("keydown", (e) => {
+  if (!e.altKey || e.ctrlKey || e.metaKey || (e.key !== "ArrowLeft" && e.key !== "ArrowRight")) return;
+  const wsId = activeWsId();
+  if (!wsId) return;
+  const order = orderOf(wsId).filter((id) => termSessions.has(id));
+  if (!order.length) return;
+  e.preventDefault();
+  e.stopPropagation();
+  const dir = e.key === "ArrowRight" ? 1 : -1;
+  const at = order.indexOf(focusedTerm()); // -1 on the workspace project page
+  focusTerm(wsId, order[at < 0 ? (dir > 0 ? 0 : order.length - 1) : (at + dir + order.length) % order.length]);
+}, true);
 
 // suppress the browser's default context menu everywhere except text inputs
 // (where cut/copy/paste is still useful). Custom menus call stopPropagation.

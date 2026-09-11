@@ -821,9 +821,13 @@ fn codex_rollout_file_meta(path: &std::path::Path) -> Option<(String, String)> {
     codex_rollout_meta(&line)
 }
 
-/// a codex session id exists if some rollout filename embeds it
+fn codex_rollout_id(path: &std::path::Path) -> Option<String> {
+    codex_rollout_file_meta(path).map(|(id, _)| id)
+}
+
+/// A codex session ID exists if a rollout's metadata contains that exact ID.
 fn codex_session_exists(id: &str) -> bool {
-    codex_rollout_files().iter().any(|p| p.file_name().is_some_and(|n| n.to_string_lossy().contains(id)))
+    codex_rollout_files().iter().any(|p| codex_rollout_id(p).as_deref() == Some(id))
 }
 
 /// codex's `resume --last` doesn't follow in-TUI session switches; find the
@@ -833,9 +837,7 @@ fn codex_latest_session(cwd: &str) -> Option<String> {
     // newest file first; the first cwd match is the latest session for it
     files.sort_by_key(|p| std::cmp::Reverse(fs::metadata(p).and_then(|m| m.modified()).ok()));
     files.iter().find_map(|p| {
-        // rollouts can be megabytes — read only the first line
-        let line = std::io::BufRead::lines(std::io::BufReader::new(fs::File::open(p).ok()?)).next()?.ok()?;
-        let (id, c) = codex_rollout_meta(&line)?;
+        let (id, c) = codex_rollout_file_meta(p)?;
         (norm_path(&c) == norm_path(cwd)).then_some(id)
     })
 }
@@ -995,8 +997,7 @@ fn codex_sessions(cwd: &str) -> Vec<SessionChoice> {
     files
         .iter()
         .filter_map(|p| {
-            let line = std::io::BufRead::lines(std::io::BufReader::new(fs::File::open(p).ok()?)).next()?.ok()?;
-            let (id, c) = codex_rollout_meta(&line)?;
+            let (id, c) = codex_rollout_file_meta(p)?;
             if norm_path(&c) != norm_path(cwd) {
                 return None;
             }
@@ -1705,6 +1706,17 @@ hooks = false
         );
         assert_eq!(codex_rollout_meta(r#"{"type":"response_item"}"#), None);
         assert_eq!(codex_rollout_meta("garbage"), None);
+    }
+
+    #[test]
+    fn codex_rollout_file_returns_payload_id_not_filename() {
+        let path = std::env::temp_dir().join(format!("rollout-misleading-{}.jsonl", std::process::id()));
+        fs::write(
+            &path,
+            r#"{"type":"session_meta","payload":{"session_id":"real-session-uuid","cwd":"E:\\workspacer"}}"#,
+        ).unwrap();
+        assert_eq!(codex_rollout_id(&path).as_deref(), Some("real-session-uuid"));
+        fs::remove_file(path).ok();
     }
 
     #[test]
