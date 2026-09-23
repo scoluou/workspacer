@@ -1,7 +1,8 @@
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};
-use std::os::windows::process::CommandExt;
-use std::process::{Command, Stdio};
+#[cfg(windows)]
+use std::process::Command;
+use std::process::Stdio;
 use std::time::Duration;
 
 pub fn home() -> std::path::PathBuf {
@@ -12,10 +13,8 @@ pub fn home() -> std::path::PathBuf {
 /// Ask Codex itself to resolve user/profile/trusted-project config. Do not
 /// reimplement its precedence rules or silently discard existing instructions.
 pub fn developer_instructions(cwd: &str) -> Result<String, String> {
-    let mut child = Command::new("cmd.exe")
-        .args(["/d", "/c", "codex", "app-server"])
+    let mut child = crate::agent_cli("codex", &["app-server"])
         .current_dir(cwd)
-        .creation_flags(0x0800_0000)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -63,16 +62,20 @@ pub fn developer_instructions(cwd: &str) -> Result<String, String> {
         .map_err(|_| "Timed out reading Codex config; existing instructions were not overwritten".to_string())
         .and_then(|r| r);
     // A .cmd shim has descendants; terminate only our private helper on timeout.
+    // (unix needs no help: the npm shim is exec'd, so there is nothing to reap.)
     for _ in 0..20 {
         if child.try_wait().ok().flatten().is_some() {
             return result;
         }
         std::thread::sleep(Duration::from_millis(50));
     }
-    let _ = Command::new("taskkill.exe")
-        .args(["/PID", &child.id().to_string(), "/T", "/F"])
-        .creation_flags(0x0800_0000)
-        .output();
+    #[cfg(windows)]
+    {
+        let mut taskkill = Command::new("taskkill.exe");
+        taskkill.args(["/PID", &child.id().to_string(), "/T", "/F"]);
+        crate::hide_console(&mut taskkill);
+        let _ = taskkill.output();
+    }
     let _ = child.kill();
     let _ = child.wait();
     result

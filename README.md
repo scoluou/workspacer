@@ -77,6 +77,11 @@ Download the installer (NSIS / MSI) from
 source below. Requires Windows 10/11 with the WebView2 Runtime
 (preinstalled on Windows 11) and whichever agent CLIs you want to launch.
 
+On macOS there is no prebuilt release yet — build from source (`build.command`
+or `npx tauri build`), which produces `src-tauri/target/release/workspacer` and
+`.app` / `.dmg` bundles. Requires Xcode Command Line Tools (Tauri's system
+WebView is already part of the OS).
+
 ## 🛠️ Development
 
 Prerequisites: [Node.js](https://nodejs.org), [Rust](https://rustup.rs).
@@ -86,6 +91,10 @@ npm install
 npm run tauri:dev    # run in dev mode with hot reload
 ```
 
+On macOS the same `npm run tauri:dev` works; `./dev.command` is the
+double-clickable equivalent of `dev.cmd` (it also closes a running instance
+first, which single-instance would otherwise use to block the dev build).
+
 ## 🏗️ Building
 
 ```bash
@@ -93,17 +102,35 @@ npm run tauri:build         # NSIS + MSI installers under src-tauri/target/relea
 npx tauri build --no-bundle # just the exe: src-tauri/target/release/workspacer.exe
 ```
 
+On macOS: `./build.command` (or `./build.command -Bundle`), producing
+`src-tauri/target/release/workspacer` or `.app` / `.dmg` bundles.
+
 ## 🧰 Tech stack
 
 - **Frontend**: TypeScript + Vite (no framework), [xterm.js](https://xtermjs.org)
 - **Backend**: Rust + [Tauri 2](https://tauri.app) (system WebView2),
   [portable-pty](https://crates.io/crates/portable-pty)
 
+## 🖥️ Platform notes
+
+- **Launch modes**: the two external-terminal modes are `cmd.exe` /
+  PowerShell consoles on Windows and Terminal.app / iTerm windows on macOS.
+  The embedded terminal is identical on both.
+- **Agent CLIs**: on Windows npm installs them as `.cmd` shims, so every launch
+  goes through `cmd.exe`; on macOS the binary is exec'd directly. Windows
+  therefore also sanitizes context text for cmd's parser, while macOS passes it
+  through verbatim.
+- **PATH**: a macOS app launched from Finder inherits a bare PATH, so
+  Workspacer asks your login shell (`$SHELL -lc`) once and prepends that PATH to
+  every agent it starts.
+
 ## 💾 Data
 
 Everything is stored as JSON under `%APPDATA%\workspacer\`
 (`workspaces.json`, `settings.json`, UI state). Export/import with automatic
 `.bak` backup is available in Settings.
+
+On macOS that directory is `~/Library/Application Support/workspacer/`.
 
 ## 📄 License
 

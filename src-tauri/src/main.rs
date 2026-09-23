@@ -2,12 +2,144 @@
 
 use serde::{Deserialize, Serialize};
 use std::fs;
+#[cfg(windows)]
 use std::os::windows::process::CommandExt;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Mutex;
 
 mod codex;
+
+// ---------- platform shims ----------
+// Exec is the only layer where Windows and unix genuinely diverge: Windows
+// funnels every agent through `cmd.exe` (npm installs agents as `.cmd` shims)
+// and needs Win32 creation flags, while unix execs the binary directly. The
+// data model, session discovery and PTY plumbing are shared as-is.
+
+/// Hide the console window of a child we spawn — a console program started
+/// from a GUI process would otherwise flash a window. No-op on unix.
+fn hide_console(cmd: &mut Command) {
+    #[cfg(windows)]
+    cmd.creation_flags(0x0800_0000);
+    #[cfg(not(windows))]
+    let _ = cmd;
+}
+
+/// PATH for agent child processes. Windows: inherited untouched. macOS: an app
+/// launched from Finder gets a bare `/usr/bin:/bin:…`, so agent CLIs installed
+/// under `~/.local/bin`, homebrew or an npm prefix would be invisible — ask the
+/// login shell once and prepend what it has.
+fn agent_path() -> &'static str {
+    static PATH: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    PATH.get_or_init(|| {
+        let current = std::env::var("PATH").unwrap_or_default();
+        #[cfg(windows)]
+        return current;
+        #[cfg(not(windows))]
+        match login_shell_path() {
+            Some(login) if !login.is_empty() => format!("{login}:{current}"),
+            _ => current,
+        }
+    })
+}
+
+/// The PATH a login shell has (`$SHELL -lc`). A login shell is enough: on macOS
+/// the system PATH (path_helper + homebrew's /etc/paths.d) and a user's
+/// `.zprofile` edits both land there. The marker keeps any shell banner that
+/// leaks onto stdout out of the result.
+#[cfg(not(windows))]
+fn login_shell_path() -> Option<String> {
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
+    let out = Command::new(&shell)
+        .args(["-lc", "printf 'WS_PATH=%s' \"$PATH\""])
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let path = text.rsplit("WS_PATH=").next()?.trim().to_string();
+    (path.contains('/')).then_some(path)
+}
+
+/// `Command` that runs agent CLI `prog` with `args`. On Windows it must go
+/// through the shell: CreateProcess alone only resolves `.exe`, and npm's agent
+/// shims are `.cmd` (`/d` skips AutoRun scripts). unix execs the binary — the
+/// npm shim there is a shebang script the kernel runs directly.
+fn agent_cli(prog: &str, args: &[&str]) -> Command {
+    #[cfg(windows)]
+    let mut cmd = {
+        let mut c = Command::new("cmd.exe");
+        c.arg("/d").arg("/c").arg(prog).args(args);
+        c
+    };
+    #[cfg(not(windows))]
+    let mut cmd = {
+        let mut c = Command::new(resolve_prog(prog));
+        c.args(args);
+        c
+    };
+    hide_console(&mut cmd);
+    cmd
+}
+
+/// Absolute path of `prog` on the agent PATH. Resolving here keeps the spawn
+/// independent of how the child env's PATH gets looked up, and gives a direct
+/// exec instead of a lookup per spawn. Falls back to `prog` unchanged —
+/// `resolve_launch` has already rejected a program that isn't installed.
+#[cfg(not(windows))]
+fn resolve_prog(prog: &str) -> String {
+    if std::path::Path::new(prog).components().count() > 1 {
+        return prog.to_string();
+    }
+    agent_path()
+        .split(':')
+        .map(|d| std::path::Path::new(d).join(prog))
+        .find(|p| {
+            use std::os::unix::fs::PermissionsExt;
+            p.metadata().map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0).unwrap_or(false)
+        })
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|| prog.to_string())
+}
+
+/// Split a launch line assembled by `build_agent` back into argv. That string
+/// is a Windows command line — `quote()` wraps in `"`, `codex::config_arg`
+/// guards its inner quotes with backslashes — and on unix there is no shell in
+/// between to undo that, so the agent must receive the argv it was meant to
+/// see, `\"` → `"` included (this mirrors what the MSVC argv parser does).
+#[cfg(not(windows))]
+fn split_win_line(s: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut in_q = false;
+    let mut started = false; // distinguishes an empty arg from no arg
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' if chars.peek() == Some(&'"') => {
+                cur.push('"');
+                chars.next();
+                started = true;
+            }
+            '"' => {
+                in_q = !in_q;
+                started = true;
+            }
+            c if c.is_whitespace() && !in_q => {
+                if started {
+                    out.push(std::mem::take(&mut cur));
+                    started = false;
+                }
+            }
+            c => {
+                cur.push(c);
+                started = true;
+            }
+        }
+    }
+    if started {
+        out.push(cur);
+    }
+    out
+}
 
 // ---------- undo/redo ----------
 /// Snapshot-based undo for the workspace list: every mutating command records
@@ -123,6 +255,7 @@ fn quote(s: &str) -> String {
 /// ponytail: project PATHS are not sanitized (they must stay exact); a folder
 /// whose name contains & or % can still break the launch line — rare enough
 /// that we accept the ceiling rather than switch launch mechanism.
+#[cfg(windows)]
 fn cmd_safe(s: &str) -> String {
     s.chars()
         .map(|c| match c {
@@ -137,6 +270,13 @@ fn cmd_safe(s: &str) -> String {
             _ => c,
         })
         .collect()
+}
+
+/// unix has no shell in the launch path (argv goes straight to exec), so the
+/// agent sees exactly the text the user typed.
+#[cfg(not(windows))]
+fn cmd_safe(s: &str) -> String {
+    s.to_string()
 }
 
 /// Raw context summary lines (workspace desc, described projects, all files).
@@ -413,8 +553,10 @@ fn build_agent(agent: &str, ws: &Workspace, session_id: &str, resume: bool, labe
     Ok(LaunchSpec { prog, args: args.trim().to_string(), cwd, initial_prompt, developer_context: None })
 }
 
-/// Is `prog` resolvable on PATH (PATHEXT-aware)? Used to fail fast with a
-/// clean error instead of a console window flashing "'x' is not recognized".
+/// Is `prog` resolvable on PATH? Used to fail fast with a clean error instead
+/// of an agent that dies instantly. Windows is PATHEXT-aware because cmd can't
+/// execute an extension-less file; unix looks for an executable bit.
+#[cfg(windows)]
 fn on_path(prog: &str) -> bool {
     // bare names only count via PATHEXT (cmd can't execute extensionless files)
     let has_ext = std::path::Path::new(prog).extension().is_some();
@@ -433,6 +575,24 @@ fn on_path(prog: &str) -> bool {
     std::env::var_os("PATH")
         .map(|paths| std::env::split_paths(&paths).any(|d| found_in(&d)))
         .unwrap_or(false)
+}
+
+#[cfg(not(windows))]
+fn on_path(prog: &str) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    let is_exec = |p: &std::path::Path| {
+        p.metadata()
+            .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false)
+    };
+    let p = std::path::Path::new(prog);
+    // a path with a separator is used as-is; a bare name is looked up on PATH
+    if p.components().count() > 1 {
+        return is_exec(p);
+    }
+    // agent_path(), not PATH: a Finder-launched app has a bare PATH, and an
+    // installed agent behind a login shell must still pass this check
+    agent_path().split(':').any(|d| is_exec(&std::path::Path::new(d).join(prog)))
 }
 
 // ---------- embedded terminal (PROTOTYPE — experiment/embedded-terminal) ----------
@@ -463,6 +623,8 @@ fn term_alive(sessions: tauri::State<PtyMap>, id: u32) -> bool {
 /// Split our pre-quoted arg string into argv (quotes only wrap, never embedded —
 /// cmd_safe guarantees that for context, and paths can't contain `"`).
 /// PROTOTYPE: exists because build_agent predates the PTY path.
+/// unix uses `split_win_line` (which also unescapes `\"`) instead.
+#[cfg_attr(not(windows), allow(dead_code))]
 fn split_args(s: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut cur = String::new();
@@ -541,25 +703,45 @@ fn launch_agent_embedded(
     } else {
         None
     };
-    // agents are .cmd shims → must run under cmd. portable-pty MSVC-quotes
-    // every argv element (cmdbuilder.rs append_quoted), so `cmd /c <our
-    // pre-quoted line>` gets re-quoted and the inner quotes break (codex:
-    // "unexpected argument ''x''"); a temp .bat parses in the system ANSI
-    // codepage and mangles non-ASCII text. Instead hand the line to cmd via
-    // an env var — the env block is UTF-16 (lossless) and %VAR% expansion
-    // yields the exact line for cmd to parse, quotes and CJK intact.
-    let cmdline = if spec.args.is_empty() { spec.prog.clone() } else { format!("{} {}", spec.prog, spec.args) };
     let pty = native_pty_system();
     // spawn at the terminal's real size — starting at 80x24 and resizing after
     // would make the agent draw two frames (the "duplicate display" artifact)
     let pair = pty
         .openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
         .map_err(|e| e.to_string())?;
-    let mut cmd = CommandBuilder::new("cmd.exe");
-    cmd.env("WORKSPACER_LAUNCH", &cmdline);
-    cmd.args(["/c", "%WORKSPACER_LAUNCH%"]);
-    cmd.cwd(&spec.cwd);
-    let child = pair.slave.spawn_command(cmd).map_err(|e| e.to_string())?;
+    // Windows: agents are .cmd shims → must run under cmd. portable-pty
+    // MSVC-quotes every argv element (cmdbuilder.rs append_quoted), so
+    // `cmd /c <our pre-quoted line>` gets re-quoted and the inner quotes break
+    // (codex: "unexpected argument ''x''"); a temp .bat parses in the system
+    // ANSI codepage and mangles non-ASCII text. Instead hand the line to cmd via
+    // an env var — the env block is UTF-16 (lossless) and %VAR% expansion
+    // yields the exact line for cmd to parse, quotes and CJK intact.
+    #[cfg(windows)]
+    let child = {
+        let cmdline = if spec.args.is_empty() { spec.prog.clone() } else { format!("{} {}", spec.prog, spec.args) };
+        let mut cmd = CommandBuilder::new("cmd.exe");
+        cmd.env("WORKSPACER_LAUNCH", &cmdline);
+        cmd.args(["/c", "%WORKSPACER_LAUNCH%"]);
+        cmd.cwd(&spec.cwd);
+        pair.slave.spawn_command(cmd).map_err(|e| e.to_string())?
+    };
+    // unix: exec the agent directly — no shim to resolve, no shell parser to
+    // fight, so the argv is handed over as argv. PATH/TERM/LANG are set
+    // explicitly because a windowed launch inherits almost nothing from the
+    // user's shell (and an agent TUI misbehaves without a sane TERM).
+    #[cfg(not(windows))]
+    let child = {
+        let mut cmd = CommandBuilder::new(resolve_prog(&spec.prog));
+        cmd.args(split_win_line(&spec.args));
+        cmd.cwd(&spec.cwd);
+        cmd.env("PATH", agent_path());
+        cmd.env("TERM", "xterm-256color");
+        cmd.env("COLORTERM", "truecolor");
+        if std::env::var_os("LANG").is_none() {
+            cmd.env("LANG", "en_US.UTF-8"); // agents need UTF-8 for CJK input
+        }
+        pair.slave.spawn_command(cmd).map_err(|e| e.to_string())?
+    };
     // bind the freshly created session to this terminal (async: the agent may
     // take a moment to create it)
     if let Some(before) = bind_before {
@@ -702,8 +884,10 @@ fn classify_paths(paths: Vec<String>) -> (Vec<String>, Vec<String>) {
 }
 
 /// Darken the Windows title bar / frame to match the app theme (DWM immersive
-/// dark mode). Called by the frontend on startup and every theme switch.
+/// dark mode). Called by the frontend on startup and every theme switch; the
+/// frontend draws its own title bar on macOS, so this is a no-op there.
 #[tauri::command]
+#[cfg_attr(not(windows), allow(unused_variables))]
 fn set_titlebar_dark(win: tauri::Window, dark: bool) {
     #[cfg(windows)]
     {
@@ -721,8 +905,6 @@ fn set_titlebar_dark(win: tauri::Window, dark: bool) {
     }
 }
 
-/// Open a URL in the default browser. rundll32 takes it as a plain argv entry,
-/// so no shell parsing is involved (& in URLs is safe).
 /// claude stores sessions at ~/.claude/projects/<cwd with non-alnum → '-'>
 fn claude_project_dir_name(cwd: &str) -> String {
     cwd.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect()
@@ -731,14 +913,27 @@ fn claude_project_dir_name(cwd: &str) -> String {
 fn pi_session_dir_name(cwd: &str) -> String {
     format!("--{}--", cwd.trim_start_matches(['/', '\\']).replace(['/', '\\', ':'], "-"))
 }
-/// cursor stores chats at ~/.cursor/chats/<md5 of backslash-normalized cwd>/<chatId>/
+/// cursor stores chats at ~/.cursor/chats/<md5 of the cwd>/<chatId>/. The hash
+/// key is the path *as that platform spells it*: backslash-normalized on
+/// Windows, the plain absolute path elsewhere.
 fn cursor_chat_dir_name(cwd: &str) -> String {
-    format!("{:x}", md5::compute(cwd.replace('/', "\\").as_bytes()))
+    #[cfg(windows)]
+    let key = cwd.replace('/', "\\");
+    #[cfg(not(windows))]
+    let key = cwd.to_string();
+    format!("{:x}", md5::compute(key.as_bytes()))
 }
 
-/// path comparison on Windows: unify slashes and case
+/// Path comparison. Windows: unify slashes and case. unix: case-sensitive
+/// paths, so only a trailing slash (never significant) is folded away.
+#[cfg(windows)]
 fn norm_path(s: &str) -> String {
     s.replace('/', "\\").to_lowercase()
+}
+
+#[cfg(not(windows))]
+fn norm_path(s: &str) -> String {
+    s.trim_end_matches('/').to_string()
 }
 
 /// one opencode session entry
@@ -772,15 +967,11 @@ fn parse_opencode_sessions(json: &str) -> Vec<OcSession> {
 
 /// opencode sessions for a directory, most recently updated first.
 fn opencode_sessions(cwd: &str) -> Vec<OcSession> {
-    use std::os::windows::process::CommandExt;
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    // via cmd so the .cmd shim resolves (CreateProcess alone only finds .exe);
     // `session list` is scoped to the CURRENT directory's project, so the
     // subprocess must run with the target dir as its cwd
-    let out = std::process::Command::new("cmd.exe")
-        .args(["/c", "opencode", "session", "list", "--format", "json"])
+    let out = agent_cli("opencode", &["session", "list", "--format", "json"])
         .current_dir(cwd)
-        .creation_flags(CREATE_NO_WINDOW)
+        .env("PATH", agent_path())
         .output();
     match out {
         Ok(o) => parse_opencode_sessions(&String::from_utf8_lossy(&o.stdout)),
@@ -1081,21 +1272,37 @@ fn load_ui_state() -> Option<serde_json::Value> {
     serde_json::from_str(&s).ok()
 }
 
+/// Hand a URL or folder to the OS default handler. Windows needs the handler
+/// named: rundll32 for a URL (it takes the URL as a plain argv entry, so no
+/// shell parsing is involved and `&` is safe), explorer for a folder. macOS's
+/// `open` covers both.
+#[cfg(windows)]
+fn open_external(target: &str, folder: bool) -> Result<(), String> {
+    let mut cmd = if folder { Command::new("explorer") } else { Command::new("rundll32") };
+    if folder {
+        cmd.arg(target);
+    } else {
+        cmd.args(["url.dll,FileProtocolHandler", target]);
+    }
+    cmd.spawn().map(|_| ()).map_err(|e| e.to_string())
+}
+
+#[cfg(not(windows))]
+fn open_external(target: &str, _folder: bool) -> Result<(), String> {
+    Command::new("open").arg(target).spawn().map(|_| ()).map_err(|e| e.to_string())
+}
+
+/// Open a URL in the default browser.
 #[tauri::command]
 fn open_url(url: String) -> Result<(), String> {
-    Command::new("rundll32")
-        .args(["url.dll,FileProtocolHandler", &url])
-        .spawn()
-        .map_err(|e| e.to_string())?;
-    Ok(())
+    open_external(&url, false)
 }
 
 #[tauri::command]
 fn open_data_dir() -> Result<(), String> {
     let dir = data_dir();
     fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    Command::new("explorer").arg(&dir).spawn().map_err(|e| e.to_string())?;
-    Ok(())
+    open_external(&dir.to_string_lossy(), true)
 }
 
 #[tauri::command]
@@ -1194,6 +1401,9 @@ fn resolve_launch(workspace_id: &str, agent_override: Option<String>, session_id
         let existing = codex::developer_instructions(&spec.cwd)?;
         spec.args.push_str(&format!(" -c {}", codex::config_arg(&existing, context)));
         // ponytail: keep cmd/.cmd launchers; put long guidance in referenced files.
+        // Windows caps a command line at ~32k UTF-16 units and cmd.exe dies far
+        // earlier; a real exec (unix) is bounded by ARG_MAX instead, so no check.
+        #[cfg(windows)]
         if spec.prog.len() + 1 + spec.args.encode_utf16().count() > 7500 {
             return Err("Codex instructions exceed the Windows command-line limit; move long guidance into referenced files".into());
         }
@@ -1201,6 +1411,46 @@ fn resolve_launch(workspace_id: &str, agent_override: Option<String>, session_id
     Ok(spec)
 }
 
+/// Single-quote for a POSIX shell: the only character needing care is `'`.
+#[cfg(not(windows))]
+fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+/// Launch the agent in a standalone terminal window. Windows creates a console
+/// through Win32 flags; macOS has no such call, so a `.command` script is
+/// written out and handed to Terminal.app (or iTerm, when it is installed).
+#[cfg(not(windows))]
+fn launch_in_external_terminal(tag: &str, spec: &LaunchSpec, prefer_iterm: bool) -> Result<(), String> {
+    let mut script = String::from("#!/bin/zsh -l\n");
+    script.push_str(&format!("cd {}\n", shell_quote(&spec.cwd)));
+    let mut line = format!("exec {}", shell_quote(&resolve_prog(&spec.prog)));
+    for arg in split_win_line(&spec.args) {
+        line.push(' ');
+        line.push_str(&shell_quote(&arg));
+    }
+    script.push_str(&line);
+    script.push('\n');
+    let path = std::env::temp_dir().join(format!("workspacer-launch-{tag}.command"));
+    fs::write(&path, script).map_err(|e| e.to_string())?;
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).map_err(|e| e.to_string())?;
+    }
+    let app = if prefer_iterm && std::path::Path::new("/Applications/iTerm.app").exists() {
+        "iTerm"
+    } else {
+        "Terminal"
+    };
+    Command::new("open")
+        .args(["-a", app])
+        .arg(&path)
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[cfg(windows)]
 #[tauri::command]
 fn launch_agent(workspace_id: String, agent_override: Option<String>) -> Result<String, String> {
     // external console: no session id, no label (fire-and-forget)
@@ -1242,6 +1492,7 @@ fn launch_agent(workspace_id: String, agent_override: Option<String>) -> Result<
 /// Launch via a new PowerShell console. The command goes into a temp .ps1 so
 /// nothing passes through two shell parsers (PS quoting: single quotes with ''
 /// doubling — cmd_safe already folded `"` to `'` in context text).
+#[cfg(windows)]
 #[tauri::command]
 fn launch_agent_ps(workspace_id: String, agent_override: Option<String>) -> Result<String, String> {
     let spec = resolve_launch(&workspace_id, agent_override, "", false, "")?;
@@ -1281,6 +1532,25 @@ fn launch_agent_ps(workspace_id: String, agent_override: Option<String>) -> Resu
     Ok(prog)
 }
 
+#[cfg(not(windows))]
+#[tauri::command]
+fn launch_agent(workspace_id: String, agent_override: Option<String>) -> Result<String, String> {
+    // external window: no session id, no label (fire-and-forget)
+    let spec = resolve_launch(&workspace_id, agent_override, "", false, "")?;
+    launch_in_external_terminal(&workspace_id, &spec, false)?;
+    Ok(spec.prog)
+}
+
+/// The second external-terminal flavour. On macOS that is iTerm rather than a
+/// PowerShell console (falls back to Terminal.app when iTerm isn't installed).
+#[cfg(not(windows))]
+#[tauri::command]
+fn launch_agent_ps(workspace_id: String, agent_override: Option<String>) -> Result<String, String> {
+    let spec = resolve_launch(&workspace_id, agent_override, "", false, "")?;
+    launch_in_external_terminal(&workspace_id, &spec, true)?;
+    Ok(spec.prog)
+}
+
 fn main() {
     use tauri::Manager;
     tauri::Builder::default()
@@ -1298,6 +1568,13 @@ fn main() {
         .setup(|app| {
             use tauri::WindowEvent;
             let win = app.get_webview_window("main").unwrap();
+            // The window config asks for native decorations with an overlaid
+            // title bar: that is what gives macOS its rounded corners, native
+            // shadow and traffic lights. Windows draws its own frameless frame
+            // instead, so opt out here — before the window is shown below, so
+            // no decorated frame ever flashes.
+            #[cfg(windows)]
+            let _ = win.set_decorations(false);
             let win2 = win.clone();
             win.on_window_event(move |event| {
                 if let WindowEvent::CloseRequested { api, .. } = event {
@@ -1428,6 +1705,9 @@ mod tests {
         }
     }
 
+    /// The folding is a cmd-only defence: on unix argv goes straight to exec,
+    /// so the text an agent sees is the text the user typed.
+    #[cfg(windows)]
     #[test]
     fn context_strips_cmd_metachars() {
         // a description like this used to break the cmd /c launch line entirely
@@ -1436,6 +1716,14 @@ mod tests {
             assert!(!c.contains(ch), "context contains cmd-special {ch:?}: {c}");
         }
         assert!(c.contains("my 'ws'"), "keeps readable text: {c}");
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn context_keeps_text_intact_without_a_shell() {
+        let c = build_context(&ws("my \"ws\"", "a & b | c <d> ^ 100% !x!"), "");
+        assert!(c.contains("my \"ws\""), "no shell, no folding: {c}");
+        assert!(c.contains("a & b | c <d> ^ 100% !x!"), "verbatim: {c}");
     }
 
     #[test]
@@ -1513,6 +1801,8 @@ mod tests {
         fs::remove_dir_all(dir).unwrap();
     }
 
+    /// Needs a real cmd.exe / powershell.exe on PATH.
+    #[cfg(windows)]
     #[test]
     fn codex_config_survives_cmd_and_powershell() {
         let dir = std::env::temp_dir().join(format!("workspacer-codex-argv-{}", std::process::id()));
@@ -1549,17 +1839,9 @@ mod tests {
         fs::remove_dir_all(dir).unwrap();
     }
 
-    /// No real model service: the offline provider points at a closed local port.
-    /// Run with Codex on PATH and --test-threads=1. CODEX_HOME is isolated.
-    #[test]
-    #[ignore]
-    fn codex_live_config_and_idle_session() {
-        let dir = std::env::temp_dir().join(format!("workspacer-codex-live-{}", std::process::id()));
-        let home = dir.join("home");
-        let project = dir.join("project");
-        fs::create_dir_all(&home).unwrap();
-        fs::create_dir_all(&project).unwrap();
-        let base_config = format!(r#"
+    /// Offline Codex config: a closed local port, so nothing reaches a model.
+    fn codex_test_config(project: &std::path::Path) -> String {
+        format!(r#"
 developer_instructions = "EXISTING_RULE_KEEP_ME"
 model = "gpt-5.6-terra"
 model_provider = "workspacer_test"
@@ -1574,8 +1856,43 @@ trust_level = "trusted"
 [features]
 apps = false
 hooks = false
-"#, project.display());
-        fs::write(home.join("config.toml"), &base_config).unwrap();
+"#, project.display())
+    }
+
+    /// The `codex app-server` config read (resolve_launch's context merge) —
+    /// the one Codex integration that is not gated on a rollout.
+    /// Needs Codex on PATH; CODEX_HOME is isolated. Run --test-threads=1.
+    #[test]
+    #[ignore]
+    fn codex_live_config_read() {
+        let dir = std::env::temp_dir().join(format!("workspacer-codex-config-{}", std::process::id()));
+        let home = dir.join("home");
+        let project = dir.join("project");
+        fs::create_dir_all(&home).unwrap();
+        fs::create_dir_all(&project).unwrap();
+        fs::write(home.join("config.toml"), codex_test_config(&project)).unwrap();
+        std::env::set_var("CODEX_HOME", &home);
+        assert_eq!(codex::developer_instructions(&project.to_string_lossy()).unwrap(), "EXISTING_RULE_KEEP_ME");
+        // a trusted project's own .codex/config.toml wins over the user's
+        fs::create_dir_all(project.join(".git")).unwrap();
+        fs::create_dir_all(project.join(".codex")).unwrap();
+        fs::write(project.join(".codex/config.toml"), "developer_instructions = 'PROJECT_RULE_KEEP_ME'").unwrap();
+        assert_eq!(codex::developer_instructions(&project.to_string_lossy()).unwrap(), "PROJECT_RULE_KEEP_ME");
+        fs::remove_dir_all(dir).ok();
+    }
+
+    /// No real model service: the offline provider points at a closed local port.
+    /// Run with Codex on PATH and --test-threads=1. CODEX_HOME is isolated.
+    #[cfg(windows)]
+    #[test]
+    #[ignore]
+    fn codex_live_config_and_idle_session() {
+        let dir = std::env::temp_dir().join(format!("workspacer-codex-live-{}", std::process::id()));
+        let home = dir.join("home");
+        let project = dir.join("project");
+        fs::create_dir_all(&home).unwrap();
+        fs::create_dir_all(&project).unwrap();
+        fs::write(home.join("config.toml"), codex_test_config(&project)).unwrap();
         std::env::set_var("CODEX_HOME", &home);
         assert_eq!(codex::developer_instructions(&project.to_string_lossy()).unwrap(), "EXISTING_RULE_KEEP_ME");
         fs::create_dir_all(project.join(".git")).unwrap();
@@ -1665,6 +1982,29 @@ hooks = false
         }
     }
 
+    /// The unix launch path hands the pre-quoted line to `split_win_line`
+    /// instead of to cmd — the agent must receive exactly the argv cmd would
+    /// have handed it, TOML quotes included.
+    #[cfg(not(windows))]
+    #[test]
+    fn unix_argv_matches_the_windows_launch_line() {
+        let original = "Original \"rules\"\r\nC:\\code\\ 'quoted' & | < > ^ %PATH% !bang! 中文 😀";
+        let context = "Workspace context\n\tline 2 ends in C:\\path\\";
+        let arg = codex::config_arg(original, context);
+        let line = format!("-C {} --add-dir {} -c {arg}", quote("/a/primary"), quote("/b/two words"));
+        let argv = split_win_line(&line);
+        assert_eq!(argv[..4], ["-C", "/a/primary", "--add-dir", "/b/two words"]);
+        assert_eq!(argv[4], "-c");
+        let expected = arg.strip_prefix('"').unwrap().strip_suffix('"').unwrap().replace("\\\"", "\"");
+        assert_eq!(argv[5], expected);
+        // and that value is still the TOML string the agent parses
+        let value = expected.strip_prefix("developer_instructions=").unwrap();
+        let decoded: String = serde_json::from_str(value).unwrap();
+        assert_eq!(decoded, format!("{original}\n\n{context}"));
+        // a quoted path with a space must survive as one argv element
+        assert_eq!(split_win_line(r#"a "b c" d"#), ["a", "b c", "d"]);
+    }
+
     #[test]
     fn session_id_assigned_at_launch_and_used_at_resume() {
         let w = ws("n", "d");
@@ -1751,17 +2091,40 @@ hooks = false
         assert!(build_agent("nope", &ws("n", ""), "x", false, "").is_err());
     }
 
+    #[cfg(windows)]
     #[test]
     fn on_path_resolves_via_patext() {
         assert!(on_path("cmd")); // System32\cmd.exe is always on PATH
         assert!(!on_path("definitely-not-a-real-program-xyz"));
     }
 
+    #[cfg(not(windows))]
+    #[test]
+    fn on_path_needs_an_executable_bit() {
+        assert!(on_path("sh")); // /bin/sh always exists
+        assert!(!on_path("definitely-not-a-real-program-xyz"));
+        // a non-executable file on PATH must not count
+        let dir = std::env::temp_dir().join(format!("workspacer-path-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let plain = dir.join("ws-not-exec");
+        fs::write(&plain, "#!/bin/sh\n").unwrap();
+        assert!(!on_path(&plain.to_string_lossy()), "no exec bit, no launch");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
     #[test]
     fn session_dir_encodings() {
-        assert_eq!(claude_project_dir_name("E:\\workspacer"), "E--workspacer");
-        assert_eq!(claude_project_dir_name("C:\\Users\\xu.lu"), "C--Users-xu-lu");
-        assert_eq!(pi_session_dir_name("E:\\workspacer"), "--E--workspacer--");
+        #[cfg(windows)]
+        {
+            assert_eq!(claude_project_dir_name("E:\\workspacer"), "E--workspacer");
+            assert_eq!(claude_project_dir_name("C:\\Users\\xu.lu"), "C--Users-xu-lu");
+            assert_eq!(pi_session_dir_name("E:\\workspacer"), "--E--workspacer--");
+        }
+        #[cfg(not(windows))]
+        {
+            assert_eq!(claude_project_dir_name("/Users/scolu/Code/workspacer"), "-Users-scolu-Code-workspacer");
+            assert_eq!(pi_session_dir_name("/Users/scolu/Code"), "--Users-scolu-Code--");
+        }
     }
 
     #[test]
@@ -1789,6 +2152,50 @@ hooks = false
         let _ = fs::remove_file(&small);
         let _ = fs::remove_file(&big);
         let _ = fs::remove_file(&bin);
+    }
+
+    /// The embedded terminal's unix path end to end: split a launch line and
+    /// exec it in a real PTY, then read back what the child was handed. Codex
+    /// needs an installed CLI to run, but the plumbing is the same for any
+    /// program — this pins the part that used to depend on cmd.exe.
+    #[cfg(not(windows))]
+    #[test]
+    fn unix_pty_hands_the_child_the_split_argv() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("workspacer-pty-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let echo = dir.join("echo-argv.sh");
+        fs::write(&echo, "#!/bin/sh\nfor a in \"$@\"; do printf 'ARGV:%s\\n' \"$a\"; done\n").unwrap();
+        fs::set_permissions(&echo, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let args = format!("{} --flag {}", quote("-a"), quote("hello world"));
+        let pair = native_pty_system()
+            .openpty(PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 })
+            .unwrap();
+        let mut cmd = CommandBuilder::new(echo.to_string_lossy().into_owned());
+        cmd.args(split_win_line(&args));
+        cmd.cwd(&dir);
+        cmd.env("PATH", agent_path());
+        let mut child = pair.slave.spawn_command(cmd).unwrap();
+        drop(pair.slave);
+
+        let mut reader = pair.master.try_clone_reader().unwrap();
+        let mut out = Vec::new();
+        let mut buf = [0u8; 4096];
+        while let Ok(n) = reader.read(&mut buf) {
+            if n == 0 {
+                break;
+            }
+            out.extend_from_slice(&buf[..n]);
+            if String::from_utf8_lossy(&out).matches("ARGV:").count() >= 2 {
+                break;
+            }
+        }
+        let _ = child.kill();
+        let text = String::from_utf8_lossy(&out);
+        assert!(text.contains("ARGV:-a"), "first arg: {text:?}");
+        assert!(text.contains("ARGV:hello world"), "quoted arg survives as one: {text:?}");
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

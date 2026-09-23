@@ -4,6 +4,9 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>workspacer</title>
+  <!-- before first paint: on macOS the native title bar supplies the window
+       controls, so the frameless buttons must never flash into view -->
+  <script>if (navigator.userAgent.includes("Mac OS X")) document.documentElement.classList.add("mac");</script>
   <style>
     :root {
       /* Cursor-dark aligned neutrals: the embedded terminal's bg is painted
@@ -92,6 +95,13 @@
     .tb-btn { width: 44px; border: none; background: none; color: var(--text-dim); cursor: pointer; font-size: 0.9rem; }
     .tb-btn:hover { background: var(--bg-hover); color: var(--text); }
     .tb-close:hover { background: var(--danger); color: #fff; }
+    /* macOS: the window keeps its native frame (rounded corners, shadow,
+       traffic lights) with this 32px strip overlaid by the transparent title
+       bar. The traffic lights replace the buttons below, and the native title
+       bar owns that strip — so the title has to clear the lights. Their
+       position is set in tauri.conf.json (trafficLightPosition). */
+    html.mac .titlebar-btns { display: none; }
+    html.mac .titlebar-title { padding-left: 80px; }
 
     /* ---- sidebar ---- */
     .sidebar {

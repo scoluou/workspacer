@@ -325,6 +325,35 @@ const DICT: Record<string, Record<string, string>> = {
   },
 };
 
+// macOS has no cmd.exe / PowerShell: the two external launch modes open
+// Terminal.app and iTerm instead (launch_agent / launch_agent_ps in main.rs).
+// The stored setting values stay "cmd" / "powershell" — only the labels differ.
+const IS_MAC = navigator.userAgent.includes("Mac OS X");
+if (IS_MAC) {
+  // window controls live in the native title bar here (see index.html)
+  document.documentElement.classList.add("mac");
+  DICT.zh.launchModeHint = "内置终端在标签页内嵌运行；Terminal / iTerm 开独立终端窗口";
+  DICT.zh.launchModeCmd = "Terminal 窗口";
+  DICT.zh.launchModePs = "iTerm 窗口（未装则用 Terminal）";
+  DICT.zh.fontHint = "界面等宽字体（中文使用苹方）";
+  DICT.en.launchModeHint = "Embedded runs in a tab; Terminal / iTerm open a separate window";
+  DICT.en.launchModeCmd = "Terminal window";
+  DICT.en.launchModePs = "iTerm window (falls back to Terminal)";
+  DICT.en.fontHint = "UI monospace font (CJK uses PingFang SC)";
+}
+
+// The font stacks below mirror index.html's Windows defaults (Consolas +
+// Courier New with YaHei as the CJK floor). None of those exist on macOS —
+// and Courier New does, so leaving the defaults alone would render the whole UI
+// in Courier. SF Mono / Menlo play Consolas' role, and the bundled Maple Mono
+// NF CN stays the full-width CJK floor that keeps xterm's cell grid honest.
+const UI_STACK = IS_MAC
+  ? `"SF Mono", Menlo, "Maple Mono NF CN", "PingFang SC", -apple-system, sans-serif`
+  : `Consolas, "Courier New", "Microsoft YaHei", -apple-system, "Segoe UI", "Inter", sans-serif`;
+const MONO_STACK = IS_MAC
+  ? `"SF Mono", Menlo, "Maple Mono NF CN", "PingFang SC", monospace`
+  : `Consolas, "Courier New", "Maple Mono NF CN", "Microsoft YaHei", monospace`;
+
 function lang(): "zh" | "en" {
   if (settings.language === "zh" || settings.language === "en") return settings.language;
   // follow system: navigator.language
@@ -383,17 +412,12 @@ function applyAppearance() {
   const root = document.documentElement;
   if (settings.theme) root.dataset.theme = settings.theme;
   else delete root.dataset.theme;
-  if (settings.fontFamily) {
-    const uiStack = `"${settings.fontFamily}", Consolas, "Microsoft YaHei", "Maple Mono NF CN", monospace`;
-    // Terminal CJK must use a full-width mono fallback; YaHei is proportional
-    // and makes Chinese columns drift away from xterm's cell grid.
-    const monoStack = `"${settings.fontFamily}", Consolas, "Maple Mono NF CN", "Microsoft YaHei", monospace`;
-    root.style.setProperty("--font", uiStack);
-    root.style.setProperty("--mono", monoStack);
-  } else {
-    root.style.removeProperty("--font");
-    root.style.removeProperty("--mono");
-  }
+  // An explicit choice leads; the platform stack (see UI_STACK / MONO_STACK)
+  // supplies the CJK floor — a full-width mono fallback, because a proportional
+  // CJK face makes Chinese columns drift away from xterm's cell grid.
+  const lead = settings.fontFamily ? `"${settings.fontFamily}", ` : "";
+  root.style.setProperty("--font", `${lead}${UI_STACK}`);
+  root.style.setProperty("--mono", `${lead}${MONO_STACK}`);
   // darken the Windows title bar to match (light theme keeps it light)
   invoke("set_titlebar_dark", { dark: settings.theme !== "light" });
   // live-update embedded terminals too (xterm supports runtime theme switch)
@@ -1034,7 +1058,9 @@ function renderMain() {
 }
 // ---------- settings page ----------
 function settingsHtml(): string {
-  const fonts = ["Consolas", "Maple Mono NF CN", "Cascadia Code", "JetBrains Mono", "Microsoft YaHei"];
+  const fonts = IS_MAC
+    ? ["SF Mono", "Menlo", "Maple Mono NF CN", "JetBrains Mono", "PingFang SC"]
+    : ["Consolas", "Maple Mono NF CN", "Cascadia Code", "JetBrains Mono", "Microsoft YaHei"];
   const fontOpts = `<option value="">${esc(t("fontDefault"))}</option>` +
     fonts.map((f) => `<option value="${f}" ${settings.fontFamily === f ? "selected" : ""}>${f}</option>`).join("");
   const sizes = [11, 12, 13, 14, 15, 16];
