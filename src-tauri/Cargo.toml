@@ -1,6 +1,6 @@
 [package]
 name = "workspacer"
-version = "0.1.0"
+version = "0.2.0"
 description = "A launcher for coding agents across multi-root workspaces"
 authors = ["scolu"]
 license = "MIT"
