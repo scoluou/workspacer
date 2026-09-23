@@ -2168,7 +2168,8 @@ hooks = false
         fs::write(&echo, "#!/bin/sh\nfor a in \"$@\"; do printf 'ARGV:%s\\n' \"$a\"; done\n").unwrap();
         fs::set_permissions(&echo, fs::Permissions::from_mode(0o755)).unwrap();
 
-        let args = format!("{} --flag {}", quote("-a"), quote("hello world"));
+        let (first, second, third) = ("-a", "--flag", "hello world");
+        let args = format!("{} {} {}", quote(first), second, quote(third));
         let pair = native_pty_system()
             .openpty(PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 })
             .unwrap();
@@ -2182,19 +2183,25 @@ hooks = false
         let mut reader = pair.master.try_clone_reader().unwrap();
         let mut out = Vec::new();
         let mut buf = [0u8; 4096];
-        while let Ok(n) = reader.read(&mut buf) {
-            if n == 0 {
-                break;
-            }
-            out.extend_from_slice(&buf[..n]);
-            if String::from_utf8_lossy(&out).matches("ARGV:").count() >= 2 {
-                break;
+        // A PTY hands over whatever has arrived, so stop on the *last* line
+        // rather than counting lines — counting is a race that truncates
+        // output when the reads happen to split differently (CI hit it).
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    out.extend_from_slice(&buf[..n]);
+                    if String::from_utf8_lossy(&out).contains(&format!("ARGV:{third}")) {
+                        break;
+                    }
+                }
             }
         }
         let _ = child.kill();
-        let text = String::from_utf8_lossy(&out);
-        assert!(text.contains("ARGV:-a"), "first arg: {text:?}");
-        assert!(text.contains("ARGV:hello world"), "quoted arg survives as one: {text:?}");
+        let text = String::from_utf8_lossy(&out).replace("\r\n", "\n");
+        assert!(text.contains(&format!("ARGV:{first}\n")), "first arg: {text:?}");
+        assert!(text.contains(&format!("ARGV:{second}\n")), "second arg: {text:?}");
+        assert!(text.contains(&format!("ARGV:{third}\n")), "quoted arg stays one: {text:?}");
         fs::remove_dir_all(dir).unwrap();
     }
 
