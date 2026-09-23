@@ -1,0 +1,83 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  # Re-run for a tag that already exists (e.g. to backfill missing installers).
+  # The release body is only written when the release is created, so an
+  # existing release keeps its hand-written notes.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to build and attach artifacts to (e.g. v0.2.0)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # NSIS + MSI, i.e. tauri.conf.json's bundle targets for Windows
+          - platform: windows-latest
+            args: ""
+          # Apple silicon dmg; add/bump targets here for an Intel or universal build
+          - platform: macos-latest
+            args: "--target aarch64-apple-darwin"
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin' || '' }}
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "src-tauri -> target"
+
+      - run: npm ci
+
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ inputs.tag || github.ref_name }}
+          releaseName: "WorkSpacer __VERSION__"
+          releaseDraft: false
+          prerelease: false
+          args: ${{ matrix.args }}
+          releaseBody: |
+            Automated build of `__VERSION__`.
+
+            | Platform | Assets |
+            | --- | --- |
+            | Windows 10/11 (x64) | `*-setup.exe` (NSIS), `*.msi` (WiX) |
+            | macOS 11+ (Apple silicon) | `*.dmg` |
+
+            ### Install
+
+            **Windows**: run the NSIS installer; it creates the Start Menu shortcuts and the WebView2
+            runtime is already present on Windows 11 (on Windows 10 the installer pulls it in).
+            The binaries are unsigned, so SmartScreen will warn on first run.
+
+            **macOS**: open the `.dmg` and drag the app to Applications. The build is unsigned and
+            not notarized, so Gatekeeper refuses the first launch — right-click the app → Open → Open,
+            or clear the quarantine flag:
+
+            ```sh
+            xattr -dr com.apple.quarantine /Applications/workspacer.app
+            ```
+
+            Data lives in `%APPDATA%\workspacer\` (Windows) or
+            `~/Library/Application Support/workspacer/` (macOS).

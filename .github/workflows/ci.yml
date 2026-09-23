@@ -1,0 +1,42 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  check:
+    strategy:
+      fail-fast: false
+      matrix:
+        # Both platforms build here on purpose: the app is cfg-split at the exec
+        # layer, so a change made on one host can break the other silently.
+        platform: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "src-tauri -> target"
+
+      - run: npm ci
+
+      - name: frontend typecheck + build
+        run: npm run build
+
+      # --all-targets, so the cfg(test) code each platform gates is compiled too.
+      - name: cargo check (all targets)
+        run: cargo check --manifest-path src-tauri/Cargo.toml --all-targets
+
+      - name: cargo test
+        run: cargo test --manifest-path src-tauri/Cargo.toml
